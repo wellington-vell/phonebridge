@@ -174,6 +174,38 @@ class StdoutSink:
         sys.stdout.buffer.flush()
 
 
+# --------------------------------------------------------------------------- mute
+class Mute:
+    """SIGUSR1 toggles mute. While muted, silence is sent so the source stays alive.
+
+    State is mirrored to $XDG_RUNTIME_DIR/womic/muted for status queries.
+    """
+
+    def __init__(self):
+        self.on = False
+        self.flag = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "womic", "muted")
+        self._sync()
+        signal.signal(signal.SIGUSR1, self.toggle)
+
+    def toggle(self, *_):
+        self.on = not self.on
+        self._sync()
+        log("muted" if self.on else "unmuted")
+
+    def _sync(self):
+        try:
+            if self.on:
+                os.makedirs(os.path.dirname(self.flag), exist_ok=True)
+                open(self.flag, "w").close()
+            elif os.path.exists(self.flag):
+                os.remove(self.flag)
+        except OSError:
+            pass
+
+    def apply(self, pcm):
+        return bytes(len(pcm)) if self.on else pcm
+
+
 # --------------------------------------------------------------------------- main
 def run(args):
     opus = OpusDecoder(load_opus())
@@ -187,6 +219,7 @@ def run(args):
         log(f"adb forward tcp:{args.port} ready")
 
     out = StdoutSink() if args.stdout else VirtualMic(args.name)
+    mute = Mute()
     try:
         while True:
             try:
@@ -199,9 +232,9 @@ def run(args):
                         if last_seq is not None:
                             lost = (seq - last_seq - 1) & 0xFFFF
                             for _ in range(min(lost, 5)):
-                                out.write(opus.decode(None))
+                                out.write(mute.apply(opus.decode(None)))
                         last_seq = seq
-                        out.write(opus.decode(payload))
+                        out.write(mute.apply(opus.decode(payload)))
             except (ConnectionError, socket.timeout, OSError) as e:
                 log(f"disconnected: {e}")
                 if args.once:
@@ -209,6 +242,8 @@ def run(args):
                 log("retrying in 2s (is WO Mic started on the phone with transport=USB?)")
                 time.sleep(2)
     finally:
+        if mute.on:
+            mute.toggle()
         out.close()
         if not args.no_adb:
             adb("forward", "--remove", f"tcp:{args.port}", check=False)

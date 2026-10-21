@@ -2,11 +2,13 @@
 # Start WO Mic in the background, or stop it if it is already running.
 #   womic-toggle            toggle
 #   womic-toggle start|stop
-#   womic-toggle status     prints connected | connecting | off
+#   womic-toggle mute       toggle mute (keeps the "WO Mic" input alive)
+#   womic-toggle status     prints connected | muted | connecting | off
 set -u
 dir="${XDG_RUNTIME_DIR:-/tmp}/womic"
 pidfile="$dir/womic.pid"
 logfile="$dir/womic.log"
+mutefile="$dir/muted"
 icon="${WOMIC_ICON:-audio-input-microphone}"
 mkdir -p "$dir"
 
@@ -15,6 +17,8 @@ running() { [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
 status() {
   if ! running; then
     echo off
+  elif [ -f "$mutefile" ]; then
+    echo muted
   # Last connection event in the log decides: a later "disconnected" wins.
   elif grep -E "streaming started|disconnected" "$logfile" 2>/dev/null | tail -n 1 | grep -q "streaming started"; then
     echo connected
@@ -53,6 +57,7 @@ start() {
 case "${1:-toggle}" in
   status) status ;;
   stop) running && stop ;;
+  mute) running && kill -USR1 "$(cat "$pidfile")" ;;
   start) shift; running || start "$@" ;;
   toggle) if running; then stop; else start; fi ;;
   *) start "$@" ;;
