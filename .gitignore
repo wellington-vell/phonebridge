@@ -1,0 +1,18 @@
+# Proprietary Windows binaries (reverse-engineering input, not redistributable)
+*.exe
+*.dll
+*.sys
+*.cat
+*.inf
+extracted/
+
+# Nix
+result
+result-*
+
+# Python
+__pycache__/
+*.pyc
+
+# Local tooling
+.claude/
