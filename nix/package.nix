@@ -11,6 +11,7 @@
   libnotify,
   coreutils,
   procps,
+  gnugrep,
 }:
 stdenvNoCC.mkDerivation {
   pname = "wo-mic-linux";
@@ -21,6 +22,8 @@ stdenvNoCC.mkDerivation {
     fileset = lib.fileset.unions [
       ../womic.py
       ./womic-toggle.sh
+      ../assets/womic.png
+      ../noctalia
     ];
   };
 
@@ -38,7 +41,12 @@ stdenvNoCC.mkDerivation {
       --set-default LIBOPUS ${libopus}/lib/libopus.so.0
     install -Dm755 nix/womic-toggle.sh $out/bin/womic-toggle
     wrapProgram $out/bin/womic-toggle \
-      --prefix PATH : ${lib.makeBinPath [ libnotify coreutils procps ]}:$out/bin
+      --prefix PATH : ${lib.makeBinPath [ libnotify coreutils procps gnugrep ]}:$out/bin \
+      --set-default WOMIC_ICON $out/share/icons/hicolor/512x512/apps/wo-mic.png
+    install -Dm644 assets/womic.png $out/share/icons/hicolor/512x512/apps/wo-mic.png
+    # Noctalia bar toggle: point a `path` plugin source at share/noctalia-plugins.
+    mkdir -p $out/share/noctalia-plugins
+    cp -r noctalia/womic $out/share/noctalia-plugins/womic
     runHook postInstall
   '';
 
@@ -48,7 +56,7 @@ stdenvNoCC.mkDerivation {
       desktopName = "WO Mic";
       comment = "Use your Android phone as a microphone (toggle)";
       exec = "womic-toggle";
-      icon = "audio-input-microphone";
+      icon = "wo-mic";
       categories = [
         "AudioVideo"
         "Audio"

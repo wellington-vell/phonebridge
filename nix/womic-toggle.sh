@@ -1,33 +1,59 @@
 #!/usr/bin/env bash
 # Start WO Mic in the background, or stop it if it is already running.
+#   womic-toggle            toggle
+#   womic-toggle start|stop
+#   womic-toggle status     prints connected | connecting | off
 set -u
 dir="${XDG_RUNTIME_DIR:-/tmp}/womic"
 pidfile="$dir/womic.pid"
 logfile="$dir/womic.log"
+icon="${WOMIC_ICON:-audio-input-microphone}"
 mkdir -p "$dir"
 
-if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-  kill "$(cat "$pidfile")"
+running() { [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
+
+status() {
+  if ! running; then
+    echo off
+  # Last connection event in the log decides: a later "disconnected" wins.
+  elif grep -E "streaming started|disconnected" "$logfile" 2>/dev/null | tail -n 1 | grep -q "streaming started"; then
+    echo connected
+  else
+    echo connecting
+  fi
+}
+
+stop() {
+  running && kill "$(cat "$pidfile")"
   rm -f "$pidfile"
-  notify-send -a "WO Mic" -i audio-input-microphone "WO Mic" "Stopped"
-  exit 0
-fi
+  notify-send -a "WO Mic" -i "$icon" "WO Mic" "Stopped"
+}
 
-setsid womic "$@" >"$logfile" 2>&1 &
-echo $! >"$pidfile"
-notify-send -a "WO Mic" -i audio-input-microphone "WO Mic" \
-  "Started. Open WO Mic on the phone (Transport: USB) and press Start."
+start() {
+  setsid womic "$@" >"$logfile" 2>&1 &
+  echo $! >"$pidfile"
+  notify-send -a "WO Mic" -i "$icon" "WO Mic" \
+    "Started. Open WO Mic on the phone (Transport: USB) and press Start."
 
-# Report the outcome of the handshake once.
-for _ in $(seq 1 30); do
-  sleep 1
-  if ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    notify-send -u critical -a "WO Mic" -i audio-input-microphone "WO Mic failed" "$(tail -n 3 "$logfile")"
-    rm -f "$pidfile"
-    exit 1
-  fi
-  if grep -q "streaming started" "$logfile"; then
-    notify-send -a "WO Mic" -i audio-input-microphone "WO Mic" "Connected — select the \"WO Mic\" input"
-    exit 0
-  fi
-done
+  # Report the outcome of the handshake once.
+  for _ in $(seq 1 30); do
+    sleep 1
+    if ! running; then
+      notify-send -u critical -a "WO Mic" -i "$icon" "WO Mic failed" "$(tail -n 3 "$logfile")"
+      rm -f "$pidfile"
+      return 1
+    fi
+    if [ "$(status)" = connected ]; then
+      notify-send -a "WO Mic" -i "$icon" "WO Mic" "Connected — select the \"WO Mic\" input"
+      return 0
+    fi
+  done
+}
+
+case "${1:-toggle}" in
+  status) status ;;
+  stop) running && stop ;;
+  start) shift; running || start "$@" ;;
+  toggle) if running; then stop; else start; fi ;;
+  *) start "$@" ;;
+esac

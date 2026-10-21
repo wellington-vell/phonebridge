@@ -57,6 +57,22 @@ python3 womic.py --stdout --once | pw-play --raw --rate 48000 --channels 1 --for
 The Nix package also ships `womic-toggle` and a **WO Mic** desktop entry. Opening
 it starts the client in the background (with notifications); opening it again
 stops it. Logs go to `$XDG_RUNTIME_DIR/womic/womic.log`.
+`womic-toggle status` prints `connected`, `connecting` or `off`.
+
+### Noctalia bar toggle
+
+The package ships a [Noctalia](https://github.com/noctalia-dev/noctalia) plugin
+under `share/noctalia-plugins/womic`. Click toggles the mic, right-click tails
+the log; the icon is highlighted when connected and crossed out when off.
+
+```nix
+plugins.enabled = [ "wellington-vell/womic" ];
+plugins.source = [
+  # declaring sources replaces the defaults — re-list official/community too
+  { name = "womic"; kind = "path"; location = "${wo-mic-linux}/share/noctalia-plugins"; enabled = true; }
+];
+bar.default.end = [ "wellington-vell/womic:toggle" ];
+```
 
 ### NixOS
 

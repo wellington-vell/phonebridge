@@ -1,0 +1,17 @@
+id           = "wellington-vell/womic"
+name         = "WO Mic"
+version      = "0.1.0"
+plugin_api   = 24
+author       = "wellington-vell"
+license      = "MIT"
+icon         = "microphone"
+description  = "Toggle the WO Mic client (Android phone as microphone) from the bar."
+tags         = ["audio", "microphone"]
+dependencies = ["wo-mic-linux"]
+
+[[widget]]
+id    = "toggle"
+entry = "widget.luau"
+
+  [widget.actions]
+  middle = "none"
