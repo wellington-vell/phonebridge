@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::process::Command;
 use std::time::Duration;
 
 use crate::bluetooth::{self, BdAddr};
@@ -10,8 +11,10 @@ use crate::proto::{self, Frame};
 
 #[derive(Clone)]
 pub enum Transport {
-    /// TCP to 127.0.0.1:port, forwarded to the phone by `adb forward`.
-    Usb,
+    /// TCP to 127.0.0.1:port, forwarded to the phone by `adb forward`
+    /// before every connection attempt when `adb` is set (forwards vanish
+    /// when the phone is replugged or the adb server restarts).
+    Usb { adb: bool },
     /// TCP straight to the phone's address on the local network.
     Wifi(String),
     /// RFCOMM; the channel comes from SDP unless given.
@@ -21,7 +24,9 @@ pub enum Transport {
 impl Transport {
     pub fn hint(&self) -> &'static str {
         match self {
-            Transport::Usb => "is Phonebridge (or WO Mic) started on the phone with transport=USB?",
+            Transport::Usb { .. } => {
+                "is Phonebridge (or WO Mic) started on the phone with transport=USB?"
+            }
             Transport::Wifi(_) => {
                 "is Phonebridge (or WO Mic) started on the phone with transport=Wi-Fi, on the same network?"
             }
@@ -91,6 +96,45 @@ impl Write for Conn {
     }
 }
 
+// ---------------------------------------------------------------------- adb
+/// Run adb; its stderr becomes the error message on failure.
+pub fn adb(args: &[&str]) -> io::Result<String> {
+    let out = Command::new("adb").args(args).output().map_err(|e| {
+        let msg = match e.kind() {
+            io::ErrorKind::NotFound => "adb not found (nix-shell -p android-tools)".into(),
+            _ => format!("adb: {e}"),
+        };
+        io::Error::new(e.kind(), msg)
+    })?;
+    if !out.status.success() {
+        // The last line, without "* daemon started" chatter or prefixes.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let msg = stderr
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty() && !l.starts_with('*'))
+            .unwrap_or("failed")
+            .trim_start_matches("adb: ")
+            .trim_start_matches("error: ");
+        return Err(io::Error::other(format!(
+            "adb {}: {msg} (phone plugged in, USB debugging allowed?)",
+            args.join(" ")
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `adb forward tcp:P tcp:P`. Idempotent and cheap, so it is simply redone
+/// before each USB connection attempt.
+pub fn forward(port: u16) -> io::Result<()> {
+    let p = format!("tcp:{port}");
+    adb(&["forward", &p, &p]).map(drop)
+}
+
+pub fn remove_forward(port: u16) {
+    let _ = adb(&["forward", "--remove", &format!("tcp:{port}")]);
+}
+
 fn tcp(addr: SocketAddr) -> io::Result<Conn> {
     let sock = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
     sock.set_nodelay(true)?;
@@ -99,7 +143,12 @@ fn tcp(addr: SocketAddr) -> io::Result<Conn> {
 
 pub fn connect(t: &Transport, port: u16) -> io::Result<Conn> {
     match t {
-        Transport::Usb => tcp(SocketAddr::from(([127, 0, 0, 1], port))),
+        Transport::Usb { adb } => {
+            if *adb {
+                forward(port)?;
+            }
+            tcp(SocketAddr::from(([127, 0, 0, 1], port)))
+        }
         Transport::Wifi(host) => {
             let addr = (host.as_str(), port)
                 .to_socket_addrs()?

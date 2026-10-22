@@ -42,7 +42,9 @@ With Nix all of these are provided for you.
 4. Select **Phonebridge** as the input device in your apps (or `wpctl set-default`).
 
 Stop with `Ctrl+C`. The client reconnects automatically if the phone app stops
-or the cable is unplugged.
+or the cable is unplugged: over USB it redoes `adb forward` before every
+connection attempt (forwards vanish when the phone is replugged or the adb
+server restarts), and it starts fine without a phone attached, waiting for one.
 
 ### Wi-Fi
 
@@ -87,6 +89,7 @@ with `--bt-channel N`.
 --video-port PORT  video port (default: control port + 1, i.e. 8126)
 --video-device DEV v4l2loopback device (default: the one labelled "Phonebridge",
                    else the first v4l2loopback device)
+--video-size WxH   fixed webcam size (default 1280x720)
 ```
 
 Quick test, playing the phone straight to your speakers:
@@ -119,9 +122,35 @@ sudo modprobe v4l2loopback video_nr=10 card_label=Phonebridge exclusive_caps=1
 ```
 
 To make it permanent, put those options in `/etc/modprobe.d/` and
-`v4l2loopback` in `/etc/modules-load.d/`. With `exclusive_caps=1`, browsers list
-the camera only while Phonebridge is streaming into it. Resolution or
-orientation changes on the phone apply on the next connection.
+`v4l2loopback` in `/etc/modules-load.d/`.
+
+The webcam has a **fixed format** for as long as `phonebridge --camera` runs:
+1280x720 YUYV at 30 fps by default (`--video-size WxH` to change it). The
+phone's picture is rotated upright and fitted in: same aspect ratio is scaled,
+a portrait picture is centred over a blurred copy of itself. While the phone
+isn't streaming (not started yet, camera sharing off, unplugged) the webcam
+shows a **"Phonebridge — waiting for the phone camera" placeholder** at 5 fps,
+and when the phone reconnects (switching camera, resolution or orientation)
+the last picture stays for up to 3 s. So the device is always a valid camera
+(`exclusive_caps=1` hides a loopback device that has no writer), and an app
+that is using it never sees it vanish or change size: its video just resumes.
+
+#### Google Meet, Microsoft Teams and other browser apps
+
+1. Start the webcam (`phonebridge camera start`, or the bar widget) **before**
+   joining; the phone can be started later.
+2. Pick **Phonebridge**: Meet → *Settings → Video → Camera*; Teams → *Settings →
+   Devices → Camera* (or the camera menu next to the video button before
+   joining).
+3. If it isn't listed, reload the page; if it still isn't, restart the browser
+   (Chrome reads the camera list once, and a device that appeared while it was
+   running may need a restart).
+
+Tested with Chromium and Firefox (`getUserMedia`: 1280x720 at 30 fps, frames keep
+coming across phone reconnects and orientation changes). Firefox-based browsers
+(Zen, LibreWolf) read the device directly by default; if
+`media.webrtc.camera.allow-pipewire` is turned on in `about:config`, the camera
+goes through the PipeWire camera portal instead.
 
 ### Background control
 
@@ -146,7 +175,9 @@ phonebridge camera device     print the webcam device, e.g. /dev/video10
 ```
 
 The camera instance only forwards the video port over adb and the microphone
-instance only the control port, so they don't step on each other. Don't also
+instance only the control port, so they don't step on each other. Repeated
+failed attempts (phone not plugged in, app not started) are logged once, not
+on every retry. Don't also
 pass `--camera` to the microphone instance (both would claim the same webcam).
 
 **Default options.** `start` and `toggle` (and `camera start` / `camera toggle`)
@@ -217,8 +248,8 @@ programs.phonebridge = {
 };
 ```
 
-`phonebridge start --camera` (or `toggle --camera`) runs the webcam in the
-background too; the desktop entry and Noctalia widget start the microphone only.
+`phonebridge camera start` (or `camera toggle`) runs the webcam in the
+background; the desktop entry starts the microphone only.
 
 ## Android app
 

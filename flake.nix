@@ -60,7 +60,9 @@
               (lib.mkIf cfg.camera.enable {
                 boot.extraModulePackages = [ config.boot.kernelPackages.v4l2loopback ];
                 boot.kernelModules = [ "v4l2loopback" ];
-                # exclusive_caps: browsers only list the device as a camera while it has a writer.
+                # exclusive_caps: Chrome only lists the device as a camera while it
+                # has a writer; `phonebridge --camera` keeps one attached for its
+                # whole run (placeholder frames until the phone streams).
                 boot.extraModprobeConfig = ''
                   options v4l2loopback devices=1 video_nr=${toString cfg.camera.videoNr} card_label="Phonebridge" exclusive_caps=1
                 '';

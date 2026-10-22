@@ -9,6 +9,7 @@
   libopus,
   libnotify,
   ffmpeg-headless,
+  dejavu_fonts,
 }:
 rustPlatform.buildRustPackage {
   pname = "phonebridge";
@@ -41,7 +42,8 @@ rustPlatform.buildRustPackage {
         libnotify
         ffmpeg-headless
       ]} \
-      --set-default PHONEBRIDGE_ICON $out/share/icons/hicolor/512x512/apps/phonebridge.png
+      --set-default PHONEBRIDGE_ICON $out/share/icons/hicolor/512x512/apps/phonebridge.png \
+      --set-default PHONEBRIDGE_FONT ${dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf
     install -Dm644 assets/phonebridge.png $out/share/icons/hicolor/512x512/apps/phonebridge.png
     # Noctalia bar toggle: point a `path` plugin source at share/noctalia-plugins.
     mkdir -p $out/share/noctalia-plugins

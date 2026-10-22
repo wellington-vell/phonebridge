@@ -50,8 +50,10 @@ impl Platform {
         }
     }
 
-    pub fn keep_screen_on(&self, on: bool) {
-        let _ = self.call("keepScreenOn", json!({ "on": on }));
+    /// Keep the screen on while a PC is connected, if `enabled`: `mic` says
+    /// whether a microphone client is; the camera side tracks its own client.
+    pub fn keep_screen_on(&self, mic: bool, enabled: bool) {
+        let _ = self.call("keepScreenOn", json!({ "mic": mic, "enabled": enabled }));
     }
 
     /// Foreground service so capture survives the screen turning off. Called

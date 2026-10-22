@@ -24,7 +24,7 @@ use std::fs;
 use std::io;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
-use std::process::{self, Child, Command, ExitCode};
+use std::process::{self, Child, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -83,7 +83,11 @@ webcam (USB or Wi-Fi; needs ffmpeg and the v4l2loopback kernel module):
   --no-mic           camera only: no audio connection, no virtual microphone
   --video-port PORT  video port (default: control port + 1, i.e. 8126)
   --video-device DEV v4l2loopback device (default: the one labelled \"Phonebridge\",
-                     else the first v4l2loopback device)";
+                     else the first v4l2loopback device)
+  --video-size WxH   fixed webcam size (default 1280x720); the phone's picture is
+                     rotated and fitted into it, over a blurred fill, whatever its
+                     orientation. Until the phone streams, a placeholder is shown,
+                     so browsers always list the webcam";
 
 struct Args {
     port: u16,
@@ -97,6 +101,7 @@ struct Args {
     camera: bool,
     video_port: Option<u16>,
     video_device: Option<PathBuf>,
+    video_size: Option<(u32, u32)>,
 }
 
 impl Args {
@@ -108,7 +113,7 @@ impl Args {
 fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
         port: 8125,
-        transport: Transport::Usb,
+        transport: Transport::Usb { adb: true },
         udp: 0,
         name: "Phonebridge".into(),
         stdout: false,
@@ -118,6 +123,7 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
         camera: false,
         video_port: None,
         video_device: None,
+        video_size: None,
     };
     let mut it = argv;
     while let Some(arg) = it.next() {
@@ -171,6 +177,7 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 a.video_port = Some(v.parse().map_err(|_| format!("invalid video port: {v}"))?);
             }
             "--video-device" => a.video_device = Some(value()?.into()),
+            "--video-size" => a.video_size = Some(video::parse_size(&value()?)?),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 process::exit(0);
@@ -185,8 +192,8 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
         if !a.mic {
             return Err("--no-mic needs --camera (nothing to stream otherwise)".into());
         }
-        if a.video_port.is_some() || a.video_device.is_some() {
-            return Err("--video-port and --video-device need --camera".into());
+        if a.video_port.is_some() || a.video_device.is_some() || a.video_size.is_some() {
+            return Err("--video-port, --video-device and --video-size need --camera".into());
         }
     }
     if a.camera && matches!(a.transport, Transport::Bluetooth(..)) {
@@ -198,8 +205,9 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     if a.camera && a.mic && a.video_port() == a.port {
         return Err("--video-port must differ from --port".into());
     }
-    if !matches!(a.transport, Transport::Usb) {
-        a.no_adb = true;
+    match &mut a.transport {
+        Transport::Usb { adb } => *adb = !a.no_adb,
+        _ => a.no_adb = true,
     }
     Ok(a)
 }
@@ -260,8 +268,8 @@ impl Mute {
 struct Cleanup {
     mute: Mute,
     children: Mutex<Vec<Child>>,
-    /// The camera's ffmpeg, replaced on every connection by the video thread.
-    video: Mutex<Option<Child>>,
+    /// The camera's ffmpeg processes (webcam writer, per-connection decoder).
+    video: video::Procs,
     adb_ports: Vec<u16>,
     done: AtomicBool,
 }
@@ -275,14 +283,11 @@ impl Cleanup {
         if self.mute.is_on() {
             self.mute.toggle();
         }
-        let video = self.video.lock().unwrap().take();
+        self.video.stop_all();
         let children = std::mem::take(&mut *self.children.lock().unwrap());
-        video
-            .into_iter()
-            .chain(children)
-            .for_each(video::stop_child);
+        children.into_iter().for_each(video::stop_child);
         for port in &self.adb_ports {
-            let _ = adb(&["forward", "--remove", &format!("tcp:{port}")]);
+            transport::remove_forward(*port);
         }
         true
     }
@@ -297,56 +302,15 @@ impl Cleanup {
     }
 }
 
-// ---------------------------------------------------------------------- transport
-fn adb(args: &[&str]) -> Result<String, String> {
-    let out = Command::new("adb")
-        .args(args)
-        .output()
-        .map_err(|e| format!("adb: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("adb {} failed: {}", args.join(" "), stderr.trim()));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-fn setup_adb(ports: &[u16]) -> Result<(), String> {
-    let devices = adb(&["devices"]).map_err(|e| {
-        if e.contains("No such file") {
-            "adb not found (nix-shell -p android-tools)".into()
-        } else {
-            e
-        }
-    })?;
-    if !devices
-        .lines()
-        .skip(1)
-        .any(|l| l.trim().ends_with("device"))
-    {
-        return Err(
-            "no adb device; enable USB debugging and accept the prompt on the phone".into(),
-        );
-    }
-    for (i, port) in ports.iter().enumerate() {
-        if let Err(e) = adb(&["forward", &format!("tcp:{port}"), &format!("tcp:{port}")]) {
-            for done in &ports[..i] {
-                let _ = adb(&["forward", "--remove", &format!("tcp:{done}")]);
-            }
-            return Err(e);
-        }
-        log!("adb forward tcp:{port} ready");
-    }
-    Ok(())
-}
-
 /// One connection: handshake, then decode frames until the phone goes away.
-/// Network errors come back as `Ok(err)` (retryable); output errors are fatal.
+/// Network errors come back as `Ok((streamed, err))` (retryable), `streamed`
+/// telling whether the handshake got through; output errors are fatal.
 fn stream(
     args: &Args,
     dec: &mut opus::Decoder,
     out: &mut output::Output,
     mute: &Mute,
-) -> Result<io::Error, String> {
+) -> Result<(bool, io::Error), String> {
     let connect = || -> io::Result<(transport::Conn, Media, bool)> {
         let mut conn = transport::connect(&args.transport, args.port)?;
         conn.set_timeout(Duration::from_secs(5))?;
@@ -363,7 +327,7 @@ fn stream(
     };
     let (mut conn, mut media, keepalive) = match connect() {
         Ok(c) => c,
-        Err(e) => return Ok(e),
+        Err(e) => return Ok((false, e)),
     };
 
     // Keepalives until this function returns (the flag drops with it).
@@ -399,7 +363,7 @@ fn stream(
     loop {
         let frame = match media.next(&mut conn) {
             Ok(f) => f,
-            Err(e) => return Ok(e),
+            Err(e) => return Ok((true, e)),
         };
         if let Some(last) = last_seq {
             let ahead = frame.seq.wrapping_sub(last);
@@ -434,6 +398,7 @@ fn run(args: Args) -> Result<ExitCode, String> {
                 None => video::find_device(Path::new("/sys/class/video4linux"))?,
             },
             once: args.once,
+            size: args.video_size.unwrap_or(video::DEFAULT_SIZE),
         })
     } else {
         None
@@ -446,12 +411,22 @@ fn run(args: Args) -> Result<ExitCode, String> {
         ports.push(v.port);
     }
     if !args.no_adb {
-        setup_adb(&ports)?;
+        // Only a missing adb is fatal. Forwards are (re)made before every
+        // connection attempt, so a phone plugged in later, or replugged, works.
+        match transport::adb(&["devices"]) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(e.to_string()),
+            Err(e) => log!("{e}"),
+            Ok(list) if !list.lines().skip(1).any(|l| l.trim().ends_with("device")) => log!(
+                "no adb device yet; waiting for the phone (plug it in, enable USB \
+                 debugging and accept the prompt)"
+            ),
+            Ok(_) => {}
+        }
     }
     let cleanup = Arc::new(Cleanup {
         mute: Mute::new(args.mic),
         children: Mutex::new(Vec::new()),
-        video: Mutex::new(None),
+        video: video::Procs::default(),
         adb_ports: if args.no_adb { Vec::new() } else { ports },
         done: AtomicBool::new(false),
     });
@@ -500,13 +475,25 @@ fn run(args: Args) -> Result<ExitCode, String> {
             cleanup.children.lock().unwrap().extend(children);
             out
         };
+        // Failed attempts are logged when the reason changes, not every 2s.
+        let mut last = String::new();
         loop {
-            let e = stream(&args, &mut dec, &mut out, &cleanup.mute)?;
-            log!("disconnected: {e}");
+            let (streamed, e) = stream(&args, &mut dec, &mut out, &cleanup.mute)?;
+            let msg = e.to_string();
+            if streamed || msg != last {
+                if streamed {
+                    log!("disconnected: {msg}");
+                } else {
+                    log!("cannot connect: {msg}");
+                }
+                if !args.once {
+                    log!("retrying every 2s, quietly ({})", args.transport.hint());
+                }
+            }
             if args.once {
                 return Ok(ExitCode::FAILURE);
             }
-            log!("retrying in 2s ({})", args.transport.hint());
+            last = if streamed { String::new() } else { msg };
             thread::sleep(Duration::from_secs(2));
         }
     })();

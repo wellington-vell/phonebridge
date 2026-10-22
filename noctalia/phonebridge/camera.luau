@@ -7,7 +7,7 @@ local state = "off"
 
 local looks = {
   streaming = { glyph = "video", color = "primary", tip = "Phonebridge camera: streaming — click to stop, right-click to preview" },
-  connecting = { glyph = "video", color = "tertiary", tip = "Phonebridge camera: waiting for phone — click to stop" },
+  connecting = { glyph = "video", color = "tertiary", tip = "Phonebridge camera: waiting for phone (the webcam shows a placeholder) — click to stop" },
   off = { glyph = "video-off", color = "on_surface_variant", tip = "Phonebridge camera: off — click to start" },
 }
 

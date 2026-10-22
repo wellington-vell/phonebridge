@@ -9,7 +9,7 @@ mod net;
 mod platform;
 mod server;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -31,6 +31,11 @@ struct App {
     shared: Arc<Shared>,
     worker: Mutex<Option<Worker>>,
     keep_screen_on: Arc<AtomicBool>,
+    /// Microphone clients currently connected (a replaced one may report
+    /// its end after the new one started).
+    mic_clients: Arc<AtomicUsize>,
+    /// Camera sharing was started (CameraStreamer exists on the Kotlin side).
+    camera_started: AtomicBool,
     /// Why camera sharing could not be turned on. Also held while the camera
     /// is being switched, so switches never overlap.
     camera_error: Mutex<Option<String>>,
@@ -104,9 +109,11 @@ fn stop_worker(app: &AppHandle, state: &App) {
         platform.stop_bluetooth();
     }
     platform.stop_camera();
+    state.camera_started.store(false, Ordering::Relaxed);
     state.shared.stop.store(true, Ordering::Relaxed);
     let _ = worker.thread.join();
-    platform.keep_screen_on(false);
+    state.mic_clients.store(0, Ordering::Relaxed);
+    platform.keep_screen_on(false, false);
     platform.service(false, false);
     *state.camera_error.lock().unwrap() = None;
 }
@@ -136,6 +143,7 @@ fn switch_camera(app: &AppHandle, state: &App, cam: Option<&CameraConfig>) -> Re
     };
     let platform = app.state::<Platform>();
     platform.stop_camera();
+    state.camera_started.store(false, Ordering::Relaxed);
     let Some(cam) = cam else {
         // Drop the camera from the foreground service types.
         platform.service(true, false);
@@ -152,7 +160,9 @@ fn switch_camera(app: &AppHandle, state: &App, cam: Option<&CameraConfig>) -> Re
     // The service needs the camera type to keep the camera with the screen
     // off or the app in the background.
     platform.service(true, true);
-    platform.start_camera(video_port, transport == Transport::Usb, cam)
+    platform.start_camera(video_port, transport == Transport::Usb, cam)?;
+    state.camera_started.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 #[tauri::command]
@@ -174,21 +184,34 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
     state
         .keep_screen_on
         .store(config.keep_screen_on, Ordering::Relaxed);
+    state.mic_clients.store(0, Ordering::Relaxed);
+    // The camera side keeps the screen on by itself while a PC watches,
+    // so it needs the setting even if no microphone client ever connects.
+    platform.keep_screen_on(false, config.keep_screen_on);
     shared.status.lock().unwrap().error = None;
 
     platform.service(true, false);
     let thread = {
         let shared = Arc::clone(shared);
         let keep = Arc::clone(&state.keep_screen_on);
+        let clients = Arc::clone(&state.mic_clients);
         let app = app.clone();
         let (transport, port) = (config.transport, config.port);
         thread::Builder::new()
             .name("phonebridge-server".into())
             .spawn(move || {
                 let on_connected = move |connected: bool| {
-                    if !connected || keep.load(Ordering::Relaxed) {
-                        app.state::<Platform>().keep_screen_on(connected);
-                    }
+                    let n = if connected {
+                        clients.fetch_add(1, Ordering::Relaxed) + 1
+                    } else {
+                        clients
+                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                                Some(n.saturating_sub(1))
+                            })
+                            .map_or(0, |n| n.saturating_sub(1))
+                    };
+                    app.state::<Platform>()
+                        .keep_screen_on(n > 0, keep.load(Ordering::Relaxed));
                 };
                 server::serve(transport, port, shared, Arc::new(on_connected))
             })
@@ -261,8 +284,9 @@ fn set_source(state: State<'_, App>, source: Source) {
 #[tauri::command]
 fn set_keep_screen_on(app: AppHandle, state: State<'_, App>, on: bool) {
     state.keep_screen_on.store(on, Ordering::Relaxed);
-    if state.shared.status().state == server::State::Connected {
-        app.state::<Platform>().keep_screen_on(on);
+    if state.worker.lock().unwrap().is_some() {
+        let mic = state.mic_clients.load(Ordering::Relaxed) > 0;
+        app.state::<Platform>().keep_screen_on(mic, on);
     }
 }
 
@@ -291,6 +315,11 @@ fn camera_status(app: &AppHandle, state: &App) -> Value {
         return serde_json::json!({ "state": "starting" });
     };
     let error = error.clone();
+    // Skip the plugin call (one per UI poll) while there is no camera to ask
+    // about; with an error it still tells whether the permission is missing.
+    if error.is_none() && !state.camera_started.load(Ordering::Relaxed) {
+        return serde_json::json!({ "state": "off" });
+    }
     let mut camera = app.state::<Platform>().camera_status();
     if let (Some(e), Some(obj)) = (error, camera.as_object_mut()) {
         obj.insert("error".into(), e.into());
@@ -324,6 +353,8 @@ pub fn run() {
             shared: Arc::new(Shared::new()),
             worker: Mutex::new(None),
             keep_screen_on: Arc::new(AtomicBool::new(true)),
+            mic_clients: Arc::new(AtomicUsize::new(0)),
+            camera_started: AtomicBool::new(false),
             camera_error: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![

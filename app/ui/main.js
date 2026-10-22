@@ -240,9 +240,16 @@ async function poll() {
   try {
     const s = await invoke("status");
     running = s.state !== "idle" || s.transport !== null;
-    const label = s.state === "connected" && s.peer ? `Connected · ${s.peer}` : STATE_LABEL[s.state];
+    // The microphone and the camera have their own PC connections (the PC
+    // runs them as separate instances): show both.
+    const mic = s.state === "connected";
+    const cam = s.camera && s.camera.state === "streaming";
+    let label = STATE_LABEL[s.state];
+    if (mic && cam) label = "Connected · mic + camera";
+    else if (cam) label = "Connected · camera";
+    else if (mic && s.peer) label = `Connected · ${s.peer}`;
     els.status.textContent = label;
-    els.status.dataset.state = s.state;
+    els.status.dataset.state = mic || cam ? "connected" : s.state;
     els.level.style.width = `${Math.min(100, Math.sqrt(s.level) * 100)}%`;
     showError(s.error);
     renderCamera(s.camera);

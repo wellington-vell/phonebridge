@@ -60,6 +60,8 @@ class CameraStreamer(
     private val context: Context,
     private val config: Config,
     private val preview: CameraPreview?,
+    /** A PC started (true) or stopped (false) receiving video. Any thread. */
+    private val onStreaming: (Boolean) -> Unit = {},
 ) : CameraPreview.Consumer {
     data class Config(
         val port: Int,
@@ -283,6 +285,7 @@ class CameraStreamer(
             out.writeByte(s.fps)
             out.flush()
             c.attached = true
+            onStreaming(true)
             s.requestKeyframe()
             while (!sock.isClosed) {
                 val f = c.queue.poll(1, TimeUnit.SECONDS) ?: continue
@@ -302,8 +305,11 @@ class CameraStreamer(
                 if (client === c) {
                     Log.i(TAG, "camera client ${c.peer} gone")
                     client = null
+                    true
+                } else {
+                    false
                 }
-            }
+            }.let { gone -> if (gone && c.attached) onStreaming(false) }
         }
     }
 

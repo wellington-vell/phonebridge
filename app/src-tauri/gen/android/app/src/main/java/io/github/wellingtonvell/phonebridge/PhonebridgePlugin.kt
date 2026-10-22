@@ -20,7 +20,10 @@ import app.tauri.plugin.Plugin
 
 @InvokeArg
 class KeepScreenOnArgs {
-    var on: Boolean = false
+    /** A microphone client is connected. */
+    var mic: Boolean = false
+    /** The keep-screen-on setting. */
+    var enabled: Boolean = false
 }
 
 @InvokeArg
@@ -74,6 +77,25 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
     private var camera: CameraStreamer? = null
     private val preview = CameraPreview(activity)
 
+    // Keep the screen on while a PC uses the phone (main thread).
+    private var keepScreenEnabled = false
+    private var micConnected = false
+    private var cameraStreaming = false
+    private var screenKept = false
+
+    private fun applyKeepScreen() {
+        val on = keepScreenEnabled && (micConnected || cameraStreaming)
+        if (on == screenKept) return
+        screenKept = on
+        val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        if (on) activity.window.addFlags(flag) else activity.window.clearFlags(flag)
+    }
+
+    private fun setCameraStreaming(on: Boolean) {
+        cameraStreaming = on
+        applyKeepScreen()
+    }
+
     // Sharing goes on without the activity (foreground service); only the
     // preview goes away with it.
     override fun onDestroy(activity: AppCompatActivity) {
@@ -84,8 +106,9 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
     fun keepScreenOn(invoke: Invoke) {
         val args = invoke.parseArgs(KeepScreenOnArgs::class.java)
         activity.runOnUiThread {
-            val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-            if (args.on) activity.window.addFlags(flag) else activity.window.clearFlags(flag)
+            keepScreenEnabled = args.enabled
+            micConnected = args.mic
+            applyKeepScreen()
             invoke.resolve()
         }
     }
@@ -153,6 +176,8 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
         camera?.stop()
+        camera = null
+        setCameraStreaming(false)
         val config = CameraStreamer.Config(
             port = args.port,
             localOnly = args.localOnly,
@@ -163,7 +188,14 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
             portrait = args.orientation == "portrait",
         )
         try {
-            camera = CameraStreamer(activity.applicationContext, config, preview).also { it.start() }
+            var streamer: CameraStreamer? = null
+            // From the camera's client threads; a replaced streamer is ignored.
+            val onStreaming = { on: Boolean ->
+                activity.runOnUiThread { if (camera != null && camera === streamer) setCameraStreaming(on) }
+            }
+            streamer = CameraStreamer(activity.applicationContext, config, preview, onStreaming)
+            camera = streamer
+            streamer.start()
             invoke.resolve()
         } catch (e: Exception) {
             camera = null
@@ -175,6 +207,7 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
     fun stopCamera(invoke: Invoke) {
         camera?.stop()
         camera = null
+        setCameraStreaming(false)
         invoke.resolve()
     }
 
