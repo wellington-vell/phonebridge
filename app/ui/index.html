@@ -9,102 +9,126 @@
     <script src="main.js" defer></script>
   </head>
   <body>
-    <main>
-      <header>
-        <div>
+    <div class="app">
+      <!-- Fixed, never scrolls: the native camera preview is laid over #preview. -->
+      <section id="camera-top" class="top" aria-label="Camera">
+        <header>
           <h1>Phonebridge</h1>
-          <p class="tagline">Your phone as the PC's microphone and webcam</p>
-        </div>
-        <span id="status" class="pill" data-state="idle">Stopped</span>
-      </header>
+          <span id="status" class="pill" data-state="idle">Stopped</span>
+        </header>
 
-      <section class="card mic">
-        <button id="mute" class="mute" aria-pressed="false" aria-label="Mute">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path class="on" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
-            <path class="off" d="M19 11h-2c0 .74-.16 1.43-.45 2.06l1.47 1.47A6.96 6.96 0 0 0 19 11ZM15 11.17V5a3 3 0 0 0-5.94-.6L15 10.34v.83ZM4.27 3 3 4.27l6 6V11a3 3 0 0 0 4.42 2.64l1.6 1.6A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.92V21h2v-3.08a6.9 6.9 0 0 0 2.86-1.02L19.73 21 21 19.73 4.27 3Z" />
-          </svg>
-        </button>
-        <span id="mute-label" class="mute-label">Live</span>
-        <div class="meter" aria-hidden="true"><div id="level"></div></div>
-
-        <label class="slider">
-          <span class="row"><span>Volume</span><output id="gain-value">100%</output></span>
-          <input id="gain" type="range" min="0" max="400" step="5" value="100" />
-        </label>
-      </section>
-
-      <button id="toggle" class="primary">Start</button>
-      <p id="error" class="error" hidden></p>
-
-      <section class="card">
-        <h2>Connection</h2>
-        <div class="segmented" role="radiogroup" aria-label="Transport">
-          <label><input type="radio" name="transport" value="usb" checked /><span>USB</span></label>
-          <label><input type="radio" name="transport" value="wifi" /><span>Wi‑Fi</span></label>
-          <label><input type="radio" name="transport" value="bluetooth" /><span>Bluetooth</span></label>
+        <div id="preview" class="preview" data-state="off">
+          <div class="preview-msg">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4Z" />
+            </svg>
+            <span id="preview-text">Camera off</span>
+          </div>
         </div>
 
-        <label class="field">
-          <span>Control port</span>
-          <input id="port" type="number" inputmode="numeric" min="1" max="65535" value="8125" />
-        </label>
+        <div class="camera-bar">
+          <label class="switch">
+            <input id="camera" type="checkbox" />
+            <span>Share camera</span>
+          </label>
+          <span id="camera-state" class="camera-state" data-state="off">Off</span>
+          <button id="flip" class="icon-btn" type="button" aria-label="Switch to the front camera">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 5h-3.17L15 3H9L7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm-5 11.5V14H9v2.5L5.5 13 9 9.5V12h6V9.5l3.5 3.5-3.5 3.5Z" />
+            </svg>
+          </button>
+        </div>
 
-        <div id="hint" class="hint"></div>
+        <p id="camera-note" class="note" hidden>Camera sharing needs USB or Wi‑Fi</p>
+        <div id="camera-problem" class="camera-problem" hidden>
+          <p id="camera-error" class="error"></p>
+          <button id="camera-settings" class="link-btn" type="button" hidden>Open settings</button>
+        </div>
       </section>
 
-      <section class="card">
-        <h2>Audio</h2>
-        <label class="field">
-          <span>Audio source</span>
-          <select id="source">
-            <option value="mic">Microphone</option>
-            <option value="camcorder">Camcorder</option>
-            <option value="voice_recognition">Voice recognition (no processing)</option>
-            <option value="voice_communication">Voice call (echo &amp; noise cancel)</option>
-            <option value="unprocessed">Unprocessed (raw)</option>
-            <option value="voice_performance">Voice performance (Android 10+)</option>
-          </select>
-        </label>
+      <main class="scroll">
+        <section class="card mic">
+          <button id="mute" class="mute" aria-pressed="false" aria-label="Mute">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path class="on" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
+              <path class="off" d="M19 11h-2c0 .74-.16 1.43-.45 2.06l1.47 1.47A6.96 6.96 0 0 0 19 11ZM15 11.17V5a3 3 0 0 0-5.94-.6L15 10.34v.83ZM4.27 3 3 4.27l6 6V11a3 3 0 0 0 4.42 2.64l1.6 1.6A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.92V21h2v-3.08a6.9 6.9 0 0 0 2.86-1.02L19.73 21 21 19.73 4.27 3Z" />
+            </svg>
+          </button>
+          <span id="mute-label" class="mute-label">Live</span>
+          <div class="meter" aria-hidden="true"><div id="level"></div></div>
 
-        <label class="switch">
-          <span>Keep screen on while connected</span>
-          <input id="keep-screen" type="checkbox" checked />
-        </label>
-      </section>
+          <label class="slider">
+            <span class="row"><span>Volume</span><output id="gain-value">100%</output></span>
+            <input id="gain" type="range" min="0" max="400" step="5" value="100" />
+          </label>
+        </section>
 
-      <section id="camera-card" class="card">
-        <h2 class="row"><span>Camera</span><span id="camera-state" class="camera-state">Off</span></h2>
-        <label class="switch">
-          <span>Share camera</span>
-          <input id="camera" type="checkbox" />
-        </label>
-        <p id="camera-note" class="note" hidden>Camera needs USB or Wi‑Fi</p>
-        <p id="camera-error" class="error" hidden></p>
+        <button id="toggle" class="primary">Start</button>
+        <p id="error" class="error" hidden></p>
 
-        <label class="field">
-          <span>Camera</span>
-          <select id="lens">
-            <option value="back">Back</option>
-            <option value="front">Front</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Resolution</span>
-          <select id="resolution">
-            <option value="480">480p</option>
-            <option value="720">720p</option>
-            <option value="1080">1080p</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Orientation</span>
-          <select id="orientation">
-            <option value="landscape">Landscape</option>
-            <option value="portrait">Portrait</option>
-          </select>
-        </label>
-      </section>
-    </main>
+        <section id="camera-card" class="card">
+          <h2>Camera</h2>
+          <label class="field">
+            <span>Camera</span>
+            <select id="lens">
+              <option value="back">Back</option>
+              <option value="front">Front</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Resolution</span>
+            <select id="resolution">
+              <option value="480">480p</option>
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Orientation (how the phone is held)</span>
+            <select id="orientation">
+              <option value="landscape">Landscape</option>
+              <option value="portrait">Portrait</option>
+            </select>
+          </label>
+          <p class="note">Changes apply right away, also while sharing.</p>
+        </section>
+
+        <section class="card">
+          <h2>Connection</h2>
+          <div class="segmented" role="radiogroup" aria-label="Transport">
+            <label><input type="radio" name="transport" value="usb" checked /><span>USB</span></label>
+            <label><input type="radio" name="transport" value="wifi" /><span>Wi‑Fi</span></label>
+            <label><input type="radio" name="transport" value="bluetooth" /><span>Bluetooth</span></label>
+          </div>
+
+          <label class="field">
+            <span>Control port</span>
+            <input id="port" type="number" inputmode="numeric" min="1" max="65535" value="8125" />
+          </label>
+
+          <div id="hint" class="hint"></div>
+        </section>
+
+        <section class="card">
+          <h2>Audio</h2>
+          <label class="field">
+            <span>Audio source</span>
+            <select id="source">
+              <option value="mic">Microphone</option>
+              <option value="camcorder">Camcorder</option>
+              <option value="voice_recognition">Voice recognition (no processing)</option>
+              <option value="voice_communication">Voice call (echo &amp; noise cancel)</option>
+              <option value="unprocessed">Unprocessed (raw)</option>
+              <option value="voice_performance">Voice performance (Android 10+)</option>
+            </select>
+          </label>
+
+          <label class="switch">
+            <span>Keep screen on while connected</span>
+            <input id="keep-screen" type="checkbox" checked />
+          </label>
+        </section>
+      </main>
+    </div>
   </body>
 </html>

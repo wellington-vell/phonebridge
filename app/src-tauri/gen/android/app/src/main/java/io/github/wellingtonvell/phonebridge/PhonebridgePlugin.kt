@@ -5,8 +5,11 @@ import android.app.Activity
 import android.bluetooth.BluetoothManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.view.WindowManager
+import androidx.appcompat.app.AppCompatActivity
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
@@ -41,10 +44,22 @@ class CameraArgs {
     var orientation: String = "landscape"
 }
 
+@InvokeArg
+class PreviewRectArgs {
+    var x: Int = 0
+    var y: Int = 0
+    var width: Int = 0
+    var height: Int = 0
+    var radius: Float = 0f
+    var visible: Boolean = false
+}
+
 /**
  * Android side of the app, called from Rust (src/platform.rs): runtime
  * permissions, keep-screen-on, the capture foreground service, the
- * Bluetooth RFCOMM bridge and camera sharing.
+ * Bluetooth RFCOMM bridge, camera sharing and its on-screen preview.
+ *
+ * Commands run on the main thread (Tauri dispatches them there).
  */
 @TauriPlugin(
     permissions = [
@@ -57,6 +72,13 @@ class CameraArgs {
 class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
     private var bridge: BluetoothBridge? = null
     private var camera: CameraStreamer? = null
+    private val preview = CameraPreview(activity)
+
+    // Sharing goes on without the activity (foreground service); only the
+    // preview goes away with it.
+    override fun onDestroy(activity: AppCompatActivity) {
+        if (activity === this.activity) preview.destroy()
+    }
 
     @Command
     fun keepScreenOn(invoke: Invoke) {
@@ -141,7 +163,7 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
             portrait = args.orientation == "portrait",
         )
         try {
-            camera = CameraStreamer(activity.applicationContext, config).also { it.start() }
+            camera = CameraStreamer(activity.applicationContext, config, preview).also { it.start() }
             invoke.resolve()
         } catch (e: Exception) {
             camera = null
@@ -161,6 +183,32 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
         val status = camera?.status() ?: mapOf("state" to "off")
         val ret = JSObject()
         status.forEach { (k, v) -> if (v != null) ret.put(k, v) }
+        ret.put(
+            "permission",
+            activity.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED,
+        )
         invoke.resolve(ret)
+    }
+
+    /** Where the page's preview placeholder is, in window pixels. */
+    @Command
+    fun setPreviewRect(invoke: Invoke) {
+        val a = invoke.parseArgs(PreviewRectArgs::class.java)
+        preview.setRect(a.x, a.y, a.width, a.height, a.radius, a.visible)
+        invoke.resolve()
+    }
+
+    /** This app's page in the system settings, to grant a refused permission. */
+    @Command
+    fun openAppSettings(invoke: Invoke) {
+        try {
+            activity.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("cannot open the settings: ${e.message}")
+        }
     }
 }

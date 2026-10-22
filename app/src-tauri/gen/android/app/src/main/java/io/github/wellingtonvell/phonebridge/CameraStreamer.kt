@@ -2,11 +2,13 @@ package io.github.wellingtonvell.phonebridge
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaCodec
@@ -16,6 +18,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.util.Range
@@ -33,13 +36,15 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.math.abs
 
 /**
  * Shares a phone camera as an H.264 stream on its own TCP port (control
  * port + 1), next to the Rust audio server. Camera2 renders straight into
- * the encoder's input Surface, so frames never touch the CPU.
+ * the encoder's input Surface (and the on-screen [CameraPreview]), so frames
+ * never touch the CPU.
  *
  *   PC -> "PBV1"
  *   phone -> "PBV1" status u8 | codec u8 | width u16 | height u16 | rotation u16 | fps u8
@@ -48,9 +53,14 @@ import kotlin.math.abs
  *            flags: bit0 keyframe, bit1 codec config (SPS/PPS)
  *
  * All big-endian. One PC at a time; a new one replaces the old. The camera
- * is open only while a PC is connected, for battery and privacy.
+ * is open for as long as sharing is on (it feeds the preview); encoder
+ * output is dropped while no PC is connected.
  */
-class CameraStreamer(private val context: Context, private val config: Config) {
+class CameraStreamer(
+    private val context: Context,
+    private val config: Config,
+    private val preview: CameraPreview?,
+) : CameraPreview.Consumer {
     data class Config(
         val port: Int,
         /** USB: only reachable through `adb forward`. */
@@ -74,7 +84,15 @@ class CameraStreamer(private val context: Context, private val config: Config) {
         private const val MAX_QUEUED = 60
         /** A write stuck this long means the PC is gone without closing. */
         private const val WRITE_TIMEOUT_MS = 5000L
+        /** Largest preview stream; the screen is small and it costs bandwidth. */
+        private const val MAX_PREVIEW_PIXELS = 1280 * 720
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
+
+        /**
+         * Serializes opening and closing the camera across streamers, so a
+         * restarted one (new lens or size) waits for the old one to let go.
+         */
+        private val cameraLock = Object()
     }
 
     private class Frame(val data: ByteArray, val ptsUs: Long, val flags: Int)
@@ -92,13 +110,33 @@ class CameraStreamer(private val context: Context, private val config: Config) {
     }
 
     private val lock = Object()
-    private val openLock = Object()
     @Volatile private var running = false
+    @Volatile private var opening = false
     private var server: ServerSocket? = null
     private var client: Client? = null
     private var session: Session? = null
     @Volatile private var lastError: String? = null
+    private val manager = context.getSystemService(CameraManager::class.java)
+    private val main = Handler(Looper.getMainLooper())
 
+    /** Reopens the camera once another app that took it lets go. */
+    private val availability = object : CameraManager.AvailabilityCallback() {
+        private var lastRetry = 0L
+
+        override fun onCameraAvailable(cameraId: String) {
+            // Only for "taken by another app"; other failures would just repeat.
+            val retry = synchronized(lock) {
+                running && session == null && !opening && lastError?.contains("another app") == true
+            }
+            val now = SystemClock.elapsedRealtime()
+            if (retry && now - lastRetry > 2000) {
+                lastRetry = now
+                openInBackground()
+            }
+        }
+    }
+
+    /** Binds the video port and opens the camera in the background. Main thread. */
     fun start() {
         val addr = if (config.localOnly) InetAddress.getByName("127.0.0.1") else null
         val s = ServerSocket()
@@ -116,33 +154,98 @@ class CameraStreamer(private val context: Context, private val config: Config) {
                 thread(name = "phonebridge-cam-client") { serve(sock) }
             }
         }
+        preview?.consumer = this
+        manager.registerAvailabilityCallback(availability, main)
+        openInBackground()
     }
 
+    /** Main thread. The camera closes in the background. */
     fun stop() {
         running = false
         runCatching { server?.close() }
+        runCatching { manager.unregisterAvailabilityCallback(availability) }
+        if (preview?.consumer === this) preview.consumer = null
         val s = synchronized(lock) {
             client?.close()
             client = null
             session.also { session = null }
         }
-        s?.close()
+        if (s != null) thread(name = "phonebridge-cam-close") { synchronized(cameraLock) { s.close() } }
     }
 
-    /** "off" | "listening" | "streaming", for the UI. */
+    /**
+     * For the UI: state "off" | "starting" | "listening" (camera on, no PC)
+     * | "streaming" | "error", plus size, peer, error and whether the preview
+     * is live.
+     */
     fun status(): Map<String, Any?> = synchronized(lock) {
         val c = client
         val s = session
-        if (c != null && c.attached && s != null) {
-            mapOf(
-                "state" to "streaming",
-                "peer" to c.peer,
-                "width" to s.size.width,
-                "height" to s.size.height,
-            )
-        } else {
-            mapOf("state" to if (running) "listening" else "off", "error" to lastError)
+        val state = when {
+            !running -> "off"
+            s != null && c != null && c.attached -> "streaming"
+            s != null -> "listening"
+            opening -> "starting"
+            else -> "error"
         }
+        mapOf(
+            "state" to state,
+            "peer" to if (state == "streaming") c?.peer else null,
+            "width" to s?.size?.width,
+            "height" to s?.size?.height,
+            "preview" to (s?.previewLive == true),
+            "error" to if (s == null) lastError else null,
+        )
+    }
+
+    private fun openInBackground() {
+        opening = true
+        thread(name = "phonebridge-cam-open") {
+            try {
+                ensureSession()
+            } catch (_: Exception) {
+                // Already in lastError.
+            }
+        }
+    }
+
+    /** The open camera, opening it if needed; null once stopped. */
+    private fun ensureSession(): Session? = synchronized(cameraLock) {
+        try {
+            synchronized(lock) { session }?.let { return it }
+            if (!running) return null
+            opening = true
+            val new = try {
+                Session().also { it.open(preview?.surface) }
+            } catch (e: Exception) {
+                val msg = e.message ?: e.javaClass.simpleName
+                lastError = "camera: $msg"
+                Log.w(TAG, "camera unavailable", e)
+                throw e
+            }
+            synchronized(lock) {
+                if (!running) {
+                    new.close()
+                    return null
+                }
+                session = new
+                lastError = null
+            }
+            // The preview may have appeared while the camera was opening.
+            preview?.surface?.let { new.setPreviewSurface(it) }
+            new
+        } finally {
+            opening = false
+        }
+    }
+
+    override fun onPreviewSurface(surface: Surface) {
+        synchronized(lock) { session }?.setPreviewSurface(surface)
+    }
+
+    override fun onPreviewSurfaceLost(done: () -> Unit) {
+        val s = synchronized(lock) { session }
+        if (s == null) done() else s.dropPreviewSurface(done)
     }
 
     private fun serve(sock: Socket) {
@@ -163,28 +266,14 @@ class CameraStreamer(private val context: Context, private val config: Config) {
                 client.also { client = c }
             }
             old?.close()
-            // Opening takes a moment; do it outside `lock` so status() stays quick.
+            // Usually open already; if it failed earlier, try again for this PC.
             val s = try {
-                synchronized(openLock) {
-                    synchronized(lock) { session } ?: Session().also { new ->
-                        new.open()
-                        synchronized(lock) {
-                            if (!running || client !== c) {
-                                new.close()
-                                return
-                            }
-                            session = new
-                        }
-                    }
-                }
+                ensureSession() ?: throw IOException("camera sharing is off")
             } catch (e: Exception) {
-                val msg = e.message ?: e.javaClass.simpleName
-                lastError = "camera: $msg"
-                Log.w(TAG, "camera unavailable", e)
-                sendError(out, STATUS_UNAVAILABLE, msg)
+                sendError(out, STATUS_UNAVAILABLE, e.message ?: e.javaClass.simpleName)
                 return
             }
-            lastError = null
+            synchronized(lock) { if (client !== c) return }
             out.write(MAGIC)
             out.writeByte(STATUS_OK)
             out.writeByte(CODEC_H264)
@@ -209,7 +298,12 @@ class CameraStreamer(private val context: Context, private val config: Config) {
         } catch (_: InterruptedException) {
         } finally {
             c.close()
-            drop(c)
+            synchronized(lock) {
+                if (client === c) {
+                    Log.i(TAG, "camera client ${c.peer} gone")
+                    client = null
+                }
+            }
         }
     }
 
@@ -225,21 +319,7 @@ class CameraStreamer(private val context: Context, private val config: Config) {
         }
     }
 
-    /** Close the camera once its PC is gone (unless another one took over). */
-    private fun drop(c: Client): Unit = synchronized(openLock) {
-        val s = synchronized(lock) {
-            if (client !== c) return
-            Log.i(TAG, "camera client ${c.peer} gone")
-            client = null
-            session.also { session = null }
-        }
-        // Outside `lock`, as closing the camera takes a while and status()
-        // runs on the main thread; under `openLock`, so the next PC waits
-        // for the camera to be free.
-        s?.close()
-    }
-
-    /** Called on the encoder thread for every output buffer. */
+    /** Called on the camera thread for every encoder output buffer; dropped without a PC. */
     private fun deliver(s: Session, f: Frame) {
         val c = synchronized(lock) { client } ?: return
         if (!c.attached) return
@@ -269,20 +349,33 @@ class CameraStreamer(private val context: Context, private val config: Config) {
         c.queue.add(f)
     }
 
-    /** The open camera feeding the encoder. */
+    /** The open camera feeding the encoder and the preview. */
     private inner class Session {
-        private val manager = context.getSystemService(CameraManager::class.java)
         private val cameraId: String
         val size: Size
         val fps: Int
         private val fpsRange: Range<Int>
         val rotation: Int
+        private val sensorOrientation: Int
+        /** Preview stream sizes to try, best first. */
+        private val previewSizes: List<Size>
         private var codec: MediaCodec? = null
         private var surface: Surface? = null
         private var camera: CameraDevice? = null
         private var capture: CameraCaptureSession? = null
         @Volatile var codecConfig: Frame? = null
         @Volatile private var closed = false
+        /** Frames are reaching the preview. */
+        @Volatile var previewLive = false
+
+        // Camera-thread state.
+        @Volatile private var previewSurface: Surface? = null
+        /** Bumped per capture session, so callbacks of a replaced one are ignored. */
+        private var generation = 0
+        /** The preview made the camera reject the session: stream without it. */
+        private var previewUnsupported = false
+        /** Released preview surface, waiting for the camera to let go of it. */
+        private val pendingRelease = AtomicReference<(() -> Unit)?>(null)
 
         init {
             val facing = if (config.front) {
@@ -297,11 +390,13 @@ class CameraStreamer(private val context: Context, private val config: Config) {
             val chars = manager.getCameraCharacteristics(cameraId)
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             size = pickSize(map?.getOutputSizes(MediaCodec::class.java) ?: emptyArray())
+            previewSizes = pickPreviewSizes(map?.getOutputSizes(SurfaceTexture::class.java) ?: emptyArray())
             fpsRange = pickFps(chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES))
             fps = fpsRange.upper
             // Same math as JPEG_ORIENTATION, with "landscape" being the usual
             // one (phone turned counter-clockwise, device orientation 270).
             val sensor = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            sensorOrientation = sensor
             val device = if (config.portrait) 0 else 270
             val front = chars.get(CameraCharacteristics.LENS_FACING) ==
                 CameraCharacteristics.LENS_FACING_FRONT
@@ -320,6 +415,19 @@ class CameraStreamer(private val context: Context, private val config: Config) {
             val target = config.width * config.height
             return (sameAspect.ifEmpty { sizes.toList() })
                 .minBy { abs(it.width * it.height - target) }
+        }
+
+        /**
+         * Same aspect as the stream so the preview shows its exact framing:
+         * the largest one up to 720p, then the stream size itself.
+         */
+        private fun pickPreviewSizes(sizes: Array<Size>): List<Size> {
+            val aspect = size.width.toDouble() / size.height
+            val small = sizes
+                .filter { abs(it.width.toDouble() / it.height - aspect) < 0.02 }
+                .filter { it.width * it.height <= MAX_PREVIEW_PIXELS }
+                .maxByOrNull { it.width * it.height }
+            return listOfNotNull(small, size).distinct()
         }
 
         /** Prefer a fixed [fps, fps] range for even frame pacing. */
@@ -405,8 +513,9 @@ class CameraStreamer(private val context: Context, private val config: Config) {
         }
 
         /** Open camera and encoder; blocks until frames are flowing or it failed. */
-        fun open() =
+        fun open(initialPreview: Surface?) =
             try {
+                previewSurface = initialPreview
                 openOrThrow()
             } catch (e: Exception) {
                 close()
@@ -430,8 +539,7 @@ class CameraStreamer(private val context: Context, private val config: Config) {
                     throw IOException("the H.264 encoder rejected ${size.width}x${size.height}@$fps", e)
                 }
             }
-            val input = enc.createInputSurface()
-            surface = input
+            surface = enc.createInputSurface()
             enc.start()
 
             val ready = CountDownLatch(1)
@@ -451,32 +559,7 @@ class CameraStreamer(private val context: Context, private val config: Config) {
                         return
                     }
                     camera = device
-                    val outputs = listOf(OutputConfiguration(input))
-                    val cb = object : CameraCaptureSession.StateCallback() {
-                        override fun onConfigured(s: CameraCaptureSession) {
-                            capture = s
-                            try {
-                                val req = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                                    addTarget(input)
-                                    set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
-                                }
-                                s.setRepeatingRequest(req.build(), null, handler)
-                                ready.countDown()
-                            } catch (e: Exception) {
-                                fail("cannot start capture: ${e.message}")
-                            }
-                        }
-
-                        override fun onConfigureFailed(s: CameraCaptureSession) =
-                            fail("camera rejected the ${size.width}x${size.height} stream")
-                    }
-                    try {
-                        device.createCaptureSession(
-                            SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, executor, cb)
-                        )
-                    } catch (e: Exception) {
-                        fail("cannot configure camera: ${e.message}")
-                    }
+                    configure { err -> if (err != null) fail(err) else ready.countDown() }
                 }
 
                 override fun onDisconnected(device: CameraDevice) {
@@ -504,30 +587,142 @@ class CameraStreamer(private val context: Context, private val config: Config) {
             Log.i(TAG, "camera $cameraId ${size.width}x${size.height}@$fps rotation $rotation")
         }
 
+        /**
+         * (Re)create the capture session for the encoder plus the preview, if
+         * any. Camera thread. [done] gets null on success or an error.
+         */
+        private fun configure(attempt: Int = 0, done: (String?) -> Unit) {
+            val device = camera ?: return done("camera closed")
+            val input = surface ?: return done("encoder closed")
+            val gen = ++generation
+            val pv = previewSurface.takeIf { !previewUnsupported }
+            val pvSize = pv?.let { previewSizes.getOrNull(attempt) }
+            val target = pv.takeIf { pvSize != null }
+            previewLive = false
+            preview?.setLive(false)
+            if (target != null && pvSize != null) preview?.setContent(pvSize, sensorOrientation)
+            val failed = { why: String ->
+                if (target != null) {
+                    if (attempt + 1 < previewSizes.size) {
+                        Log.w(TAG, "camera rejected the preview at $pvSize ($why), trying another size")
+                    } else {
+                        Log.w(TAG, "camera rejected the preview ($why), streaming without it")
+                        previewUnsupported = true
+                    }
+                    configure(attempt + 1, done)
+                } else {
+                    done(why)
+                }
+            }
+            val cb = object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(s: CameraCaptureSession) {
+                    if (closed || gen != generation) return
+                    capture = s
+                    try {
+                        val req = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                            addTarget(input)
+                            target?.let { addTarget(it) }
+                            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+                        }
+                        s.setRepeatingRequest(req.build(), object : CameraCaptureSession.CaptureCallback() {
+                            override fun onCaptureCompleted(
+                                session: CameraCaptureSession,
+                                request: CaptureRequest,
+                                result: TotalCaptureResult,
+                            ) {
+                                if (target == null || previewLive || gen != generation || closed) return
+                                previewLive = true
+                                preview?.setLive(true)
+                            }
+                        }, handler)
+                    } catch (e: Exception) {
+                        failed("cannot start capture: ${e.message}")
+                        return
+                    }
+                    done(null)
+                    pendingRelease.getAndSet(null)?.invoke()
+                }
+
+                override fun onConfigureFailed(s: CameraCaptureSession) {
+                    if (closed || gen != generation) return
+                    failed("camera rejected the ${size.width}x${size.height} stream")
+                }
+            }
+            val outputs = listOfNotNull(OutputConfiguration(input), target?.let { OutputConfiguration(it) })
+            try {
+                device.createCaptureSession(
+                    SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, executor, cb)
+                )
+            } catch (e: Exception) {
+                failed("cannot configure camera: ${e.message}")
+            }
+        }
+
+        /** Show the preview in [s] too. Any thread. */
+        fun setPreviewSurface(s: Surface) {
+            handler.post {
+                if (closed || s === previewSurface) return@post
+                previewSurface = s
+                if (camera != null) configure { err -> err?.let { fatal(it) } }
+            }
+        }
+
+        /** Stop drawing into the preview surface, then call [done]. Any thread. */
+        fun dropPreviewSurface(done: () -> Unit) {
+            pendingRelease.getAndSet(done)?.invoke()
+            val posted = handler.post {
+                if (closed) {
+                    pendingRelease.getAndSet(null)?.invoke()
+                    return@post
+                }
+                previewSurface = null
+                runCatching { capture?.stopRepeating() }
+                if (camera != null) {
+                    configure { err ->
+                        pendingRelease.getAndSet(null)?.invoke()
+                        err?.let { fatal(it) }
+                    }
+                } else {
+                    pendingRelease.getAndSet(null)?.invoke()
+                }
+            }
+            if (!posted) pendingRelease.getAndSet(null)?.invoke()
+        }
+
         fun requestKeyframe() {
             runCatching {
                 codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
             }
         }
 
-        /** The camera died while streaming: tell the UI and drop the PC. */
+        /** The camera died while open: tell the UI, drop the PC and close. */
         private fun fatal(msg: String) {
             Log.w(TAG, msg)
-            lastError = msg
-            synchronized(lock) {
-                if (session === this) client?.close()
+            lastError = "camera: $msg"
+            val mine = synchronized(lock) {
+                if (session === this) {
+                    session = null
+                    client?.close()
+                    true
+                } else {
+                    false
+                }
             }
+            if (mine) thread(name = "phonebridge-cam-close") { synchronized(cameraLock) { close() } }
         }
 
         fun close() {
             if (closed) return
             closed = true
+            previewLive = false
+            preview?.setLive(false)
             runCatching { capture?.close() }
             runCatching { camera?.close() }
             runCatching { codec?.stop() }
             runCatching { codec?.release() }
             runCatching { surface?.release() }
             handlerThread.quitSafely()
+            pendingRelease.getAndSet(null)?.invoke()
         }
     }
 

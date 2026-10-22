@@ -1,7 +1,7 @@
 //! Phonebridge for Android: turns the phone into a microphone for the Phonebridge Linux
 //! client (and anything else speaking the WO Mic protocol) over USB, Wi-Fi
 //! or Bluetooth, and into a webcam (H.264 on control port + 1) over USB or
-//! Wi-Fi.
+//! Wi-Fi, with a live camera preview on the phone.
 
 mod capture;
 mod encoder;
@@ -24,12 +24,16 @@ use server::{Shared, Status, Transport};
 struct Worker {
     thread: JoinHandle<()>,
     transport: Transport,
+    port: u16,
 }
 
 struct App {
     shared: Arc<Shared>,
     worker: Mutex<Option<Worker>>,
     keep_screen_on: Arc<AtomicBool>,
+    /// Why camera sharing could not be turned on. Also held while the camera
+    /// is being switched, so switches never overlap.
+    camera_error: Mutex<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -41,7 +45,8 @@ struct StartConfig {
     keep_screen_on: bool,
     gain: f32,
     muted: bool,
-    /// Camera sharing, or None when off.
+    /// Camera sharing, or None when off. Can change while running
+    /// (set_camera).
     camera: Option<CameraConfig>,
 }
 
@@ -56,6 +61,17 @@ pub struct CameraConfig {
     /// "landscape" or "portrait": how the phone is held, for the rotation
     /// the PC applies.
     pub orientation: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct PreviewRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// Corner radius, physical pixels.
+    pub radius: f32,
+    pub visible: bool,
 }
 
 #[derive(Serialize)]
@@ -74,7 +90,8 @@ struct StatusReply {
     gain: f32,
     transport: Option<Transport>,
     addresses: Vec<Address>,
-    /// From CameraStreamer.kt: {state, peer?, error?, width?, height?}.
+    /// From CameraStreamer.kt: {state, peer?, error?, width?, height?,
+    /// preview, permission}, with the error of the last switch.
     camera: Value,
 }
 
@@ -91,6 +108,51 @@ fn stop_worker(app: &AppHandle, state: &App) {
     let _ = worker.thread.join();
     platform.keep_screen_on(false);
     platform.service(false, false);
+    *state.camera_error.lock().unwrap() = None;
+}
+
+/// Turn camera sharing on (or restart it with new settings) or off while
+/// running, without touching the audio stream. Does nothing when stopped:
+/// the settings then apply on start. A failure is also kept for the UI.
+fn apply_camera(app: &AppHandle, state: &App, cam: Option<&CameraConfig>) -> Result<(), String> {
+    let mut error = state.camera_error.lock().unwrap();
+    let result = switch_camera(app, state, cam);
+    if let Err(e) = &result {
+        eprintln!("[phonebridge] camera: {e}");
+    }
+    *error = result.as_ref().err().cloned();
+    result
+}
+
+fn switch_camera(app: &AppHandle, state: &App, cam: Option<&CameraConfig>) -> Result<(), String> {
+    let Some((transport, port)) = state
+        .worker
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|w| (w.transport, w.port))
+    else {
+        return Ok(());
+    };
+    let platform = app.state::<Platform>();
+    platform.stop_camera();
+    let Some(cam) = cam else {
+        // Drop the camera from the foreground service types.
+        platform.service(true, false);
+        return Ok(());
+    };
+    if transport == Transport::Bluetooth {
+        // Too slow for video.
+        return Err("camera sharing needs USB or Wi-Fi".into());
+    }
+    let video_port = port
+        .checked_add(1)
+        .ok_or("the control port must be below 65535 to share the camera")?;
+    platform.request_camera_permission()?;
+    // The service needs the camera type to keep the camera with the screen
+    // off or the app in the background.
+    platform.service(true, true);
+    platform.start_camera(video_port, transport == Transport::Usb, cam)
 }
 
 #[tauri::command]
@@ -99,24 +161,10 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
     if config.port == 0 {
         return Err("invalid control port".into());
     }
-    let camera_port = match &config.camera {
-        None => None,
-        // Too slow for video.
-        Some(_) if config.transport == Transport::Bluetooth => {
-            return Err("camera sharing needs USB or Wi-Fi".into());
-        }
-        Some(_) => Some(
-            config
-                .port
-                .checked_add(1)
-                .ok_or("the control port must be below 65535 to share the camera")?,
-        ),
-    };
     let platform = app.state::<Platform>();
-    platform.request_permissions(
-        config.transport == Transport::Bluetooth,
-        config.camera.is_some(),
-    )?;
+    // The camera's permission is asked for by apply_camera: refusing it only
+    // keeps the camera off, the microphone still starts.
+    platform.request_permissions(config.transport == Transport::Bluetooth)?;
 
     let shared = &state.shared;
     shared.stop.store(false, Ordering::Relaxed);
@@ -128,7 +176,7 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
         .store(config.keep_screen_on, Ordering::Relaxed);
     shared.status.lock().unwrap().error = None;
 
-    platform.service(true, config.camera.is_some());
+    platform.service(true, false);
     let thread = {
         let shared = Arc::clone(shared);
         let keep = Arc::clone(&state.keep_screen_on);
@@ -149,6 +197,7 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
     *state.worker.lock().unwrap() = Some(Worker {
         thread,
         transport: config.transport,
+        port: config.port,
     });
 
     if config.transport == Transport::Bluetooth
@@ -157,13 +206,35 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
         stop_worker(&app, &state);
         return Err(e);
     }
-    if let (Some(cam), Some(port)) = (&config.camera, camera_port)
-        && let Err(e) = platform.start_camera(port, config.transport == Transport::Usb, cam)
-    {
-        stop_worker(&app, &state);
-        return Err(e);
+    if let Some(cam) = &config.camera {
+        // Shown in the camera section; the microphone is up regardless.
+        let _ = apply_camera(&app, &state, Some(cam));
     }
     Ok(())
+}
+
+/// Turn camera sharing on/off or change its settings while running.
+#[tauri::command]
+async fn set_camera(
+    app: AppHandle,
+    state: State<'_, App>,
+    camera: Option<CameraConfig>,
+) -> Result<(), String> {
+    apply_camera(&app, &state, camera.as_ref())
+}
+
+/// Where the page's preview placeholder is, in physical pixels relative to
+/// the WebView, and whether the live preview should show there.
+#[tauri::command]
+async fn set_preview_rect(app: AppHandle, rect: PreviewRect) -> Result<(), String> {
+    app.state::<Platform>().set_preview_rect(&rect);
+    Ok(())
+}
+
+/// The app's system settings page, to grant a refused permission.
+#[tauri::command]
+async fn open_app_settings(app: AppHandle) -> Result<(), String> {
+    app.state::<Platform>().open_app_settings()
 }
 
 #[tauri::command]
@@ -210,8 +281,24 @@ async fn status(app: AppHandle, state: State<'_, App>) -> Result<StatusReply, St
             .into_iter()
             .map(|(interface, ip)| Address { interface, ip })
             .collect(),
-        camera: app.state::<Platform>().camera_status(),
+        camera: camera_status(&app, &state),
     })
+}
+
+fn camera_status(app: &AppHandle, state: &App) -> Value {
+    // Busy while switching (maybe waiting on the permission prompt).
+    let Ok(error) = state.camera_error.try_lock() else {
+        return serde_json::json!({ "state": "starting" });
+    };
+    let error = error.clone();
+    let mut camera = app.state::<Platform>().camera_status();
+    if let (Some(e), Some(obj)) = (error, camera.as_object_mut()) {
+        obj.insert("error".into(), e.into());
+        if obj.get("state").and_then(Value::as_str) == Some("off") {
+            obj.insert("state".into(), "error".into());
+        }
+    }
+    camera
 }
 
 fn platform_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
@@ -237,6 +324,7 @@ pub fn run() {
             shared: Arc::new(Shared::new()),
             worker: Mutex::new(None),
             keep_screen_on: Arc::new(AtomicBool::new(true)),
+            camera_error: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             start,
@@ -245,6 +333,9 @@ pub fn run() {
             set_muted,
             set_source,
             set_keep_screen_on,
+            set_camera,
+            set_preview_rect,
+            open_app_settings,
             status
         ])
         .build(tauri::generate_context!())

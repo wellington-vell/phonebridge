@@ -5,13 +5,20 @@ plugin_api   = 24
 author       = "wellington-vell"
 license      = "MIT"
 icon         = "microphone"
-description  = "Toggle the Phonebridge client (Android phone as microphone and webcam) from the bar."
-tags         = ["audio", "microphone", "webcam"]
+description  = "Toggle the Phonebridge microphone and webcam (Android phone) from the bar."
+tags         = ["audio", "microphone", "webcam", "camera"]
 dependencies = ["phonebridge"]
 
 [[widget]]
 id    = "toggle"
 entry = "widget.luau"
+
+  [widget.actions]
+  middle = "none"
+
+[[widget]]
+id    = "camera"
+entry = "camera.luau"
 
   [widget.actions]
   middle = "none"

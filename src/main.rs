@@ -55,6 +55,11 @@ usage: phonebridge [OPTIONS]                 run the client in the foreground
        phonebridge stop
        phonebridge mute                     toggle mute (the input stays, sending silence)
        phonebridge status                   print connected | muted | connecting | off
+       phonebridge camera toggle|start|stop [OPTIONS]
+                                            the same for the webcam alone, as a separate
+                                            instance (--camera --no-mic)
+       phonebridge camera status            print streaming | connecting | off
+       phonebridge camera device            print the webcam device (/dev/videoN)
 
 Use your Android phone as a microphone and webcam (USB via adb, Wi-Fi or Bluetooth)
 
@@ -69,6 +74,9 @@ options:
   --no-adb           USB: skip adb forward (ports already forwarded)
   --once             exit on the first disconnect (of either stream) instead of retrying
   -h, --help         show this help
+
+start and toggle (also camera start / toggle) without OPTIONS read default
+options from $XDG_CONFIG_HOME/phonebridge/args, e.g. `--wifi 192.168.1.20`.
 
 webcam (USB or Wi-Fi; needs ffmpeg and the v4l2loopback kernel module):
   --camera           also stream the phone's camera to a v4l2loopback webcam
@@ -200,16 +208,18 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
 /// SIGUSR1 toggles mute. While muted, silence is sent so the source stays alive.
 ///
 /// State is mirrored to $XDG_RUNTIME_DIR/phonebridge/muted for status queries.
+/// A camera-only client has no microphone and leaves the flag alone (a
+/// separate microphone instance owns it).
 struct Mute {
     on: AtomicBool,
-    flag: PathBuf,
+    flag: Option<PathBuf>,
 }
 
 impl Mute {
-    fn new() -> Self {
+    fn new(mic: bool) -> Self {
         let m = Mute {
             on: AtomicBool::new(false),
-            flag: control::state_dir().join("muted"),
+            flag: mic.then(|| control::state_dir().join("muted")),
         };
         m.set(false);
         m
@@ -220,12 +230,13 @@ impl Mute {
     }
 
     fn set(&self, on: bool) {
+        let Some(flag) = &self.flag else { return };
         self.on.store(on, Ordering::Relaxed);
         let _ = if on {
-            self.flag.parent().map(fs::create_dir_all);
-            fs::write(&self.flag, b"")
+            flag.parent().map(fs::create_dir_all);
+            fs::write(flag, b"")
         } else {
-            fs::remove_file(&self.flag).or_else(|e| match e.kind() {
+            fs::remove_file(flag).or_else(|e| match e.kind() {
                 io::ErrorKind::NotFound => Ok(()),
                 _ => Err(e),
             })
@@ -233,6 +244,9 @@ impl Mute {
     }
 
     fn toggle(&self) {
+        if self.flag.is_none() {
+            return;
+        }
         let on = !self.is_on();
         self.set(on);
         log!("{}", if on { "muted" } else { "unmuted" });
@@ -435,7 +449,7 @@ fn run(args: Args) -> Result<ExitCode, String> {
         setup_adb(&ports)?;
     }
     let cleanup = Arc::new(Cleanup {
-        mute: Mute::new(),
+        mute: Mute::new(args.mic),
         children: Mutex::new(Vec::new()),
         video: Mutex::new(None),
         adb_ports: if args.no_adb { Vec::new() } else { ports },
@@ -502,10 +516,24 @@ fn run(args: Args) -> Result<ExitCode, String> {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Validate client options up front so `start` fails loudly, not in the log.
+    let background = |kind, cmd: &str, given: &[String]| {
+        let args = control::client_args(kind, cmd, given);
+        parse_args(args.iter().cloned()).and_then(|_| control::run(kind, cmd, &args))
+    };
     let result = match argv.first().map(String::as_str) {
+        Some("camera") => match argv.get(1).map(String::as_str) {
+            Some("device") => video::find_device(Path::new("/sys/class/video4linux")).map(|d| {
+                println!("{}", d.display());
+                ExitCode::SUCCESS
+            }),
+            Some(cmd) if control::CAMERA_COMMANDS.contains(&cmd) => {
+                background(control::Kind::Camera, cmd, &argv[2..])
+            }
+            _ => Err("usage: phonebridge camera toggle|start|stop|status|device [OPTIONS]".into()),
+        },
         Some(cmd) if control::COMMANDS.contains(&cmd) => {
-            // Validate client options up front so `start` fails loudly, not in the log.
-            parse_args(argv[1..].iter().cloned()).and_then(|_| control::run(cmd, &argv[1..]))
+            background(control::Kind::Mic, cmd, &argv[1..])
         }
         _ => parse_args(argv.into_iter()).and_then(run),
     };

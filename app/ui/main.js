@@ -17,7 +17,12 @@ const els = {
   camera: $("camera"),
   cameraState: $("camera-state"),
   cameraNote: $("camera-note"),
+  cameraProblem: $("camera-problem"),
   cameraError: $("camera-error"),
+  cameraSettings: $("camera-settings"),
+  preview: $("preview"),
+  previewText: $("preview-text"),
+  flip: $("flip"),
   lens: $("lens"),
   resolution: $("resolution"),
   orientation: $("orientation"),
@@ -82,6 +87,17 @@ function renderGain() {
 // Video is too slow over Bluetooth.
 const cameraOn = () => settings.camera && settings.transport !== "bluetooth";
 
+/** Camera settings for start / set_camera, or null when sharing is off. */
+function cameraConfig() {
+  if (!cameraOn()) return null;
+  return {
+    lens: settings.lens,
+    ...(RESOLUTIONS[settings.resolution] || RESOLUTIONS[720]),
+    fps: CAMERA_FPS,
+    orientation: settings.orientation,
+  };
+}
+
 function renderHint() {
   const port = settings.port;
   const portArg = (port === 8125 ? "" : ` --port ${port}`) + (cameraOn() ? " --camera" : "");
@@ -112,27 +128,101 @@ function renderControls() {
   // Transport and port only apply when (re)starting.
   els.port.disabled = running;
   transportInputs.forEach((i) => (i.disabled = running));
-  // Camera settings too; the camera is USB / Wi-Fi only.
+  // Camera settings apply live, but the camera is USB / Wi-Fi only.
   const bluetooth = settings.transport === "bluetooth";
-  els.camera.disabled = running || bluetooth;
-  [els.lens, els.resolution, els.orientation].forEach((el) => (el.disabled = running || bluetooth));
-  els.cameraNote.hidden = !bluetooth;
+  els.camera.disabled = bluetooth;
+  els.flip.disabled = bluetooth;
+  [els.lens, els.resolution, els.orientation].forEach((el) => (el.disabled = bluetooth));
+  els.cameraNote.hidden = !(bluetooth && settings.camera);
 }
 
 const CAMERA_LABEL = {
   off: "Off",
+  starting: "Starting…",
   listening: "Waiting for PC",
   streaming: "Streaming",
+  error: "Error",
 };
 
+let camera = { state: "off" };
+
 function renderCamera(cam) {
-  const state = cam && CAMERA_LABEL[cam.state] ? cam.state : "off";
+  camera = cam && CAMERA_LABEL[cam.state] ? cam : { state: "off" };
+  const state = camera.state;
   let label = CAMERA_LABEL[state];
-  if (state === "streaming" && cam.width) label += ` ${cam.width}×${cam.height}`;
+  if (state === "streaming" && camera.height) label += ` · ${Math.min(camera.width, camera.height)}p`;
+  if (!running && settings.camera && state === "off") label = "On at start";
   els.cameraState.textContent = label;
   els.cameraState.dataset.state = state;
-  els.cameraError.hidden = !cam?.error;
-  els.cameraError.textContent = cam?.error || "";
+
+  // Errors only matter while sharing is wanted.
+  const error = cameraOn() && running ? camera.error : "";
+  const denied = Boolean(error) && camera.permission === false;
+  const msg = denied
+    ? "Camera permission denied. Allow the camera for Phonebridge in Android settings."
+    : error || "";
+  els.cameraProblem.hidden = !msg;
+  els.cameraError.textContent = msg;
+  els.cameraSettings.hidden = !denied;
+
+  renderPreview();
+}
+
+/** Placeholder text, and whether the native live preview may show. */
+function renderPreview() {
+  const state = camera.state;
+  const open = running && cameraOn() && (state === "listening" || state === "streaming");
+  let text;
+  if (!settings.camera) text = "Camera off";
+  else if (settings.transport === "bluetooth") text = "Camera sharing needs USB or Wi‑Fi";
+  else if (!running) text = "Press Start to share the camera";
+  else if (state === "error") text = "Camera unavailable";
+  else if (state === "off") text = "Camera off";
+  else text = "Starting camera…";
+  els.previewText.textContent = text;
+  els.preview.dataset.state = open || state === "starting" ? "active" : "off";
+  previewVisible = open;
+  reportPreview();
+}
+
+// --------------------------------------------------------------- preview
+// The live preview is a native view over #preview (see CameraPreview.kt);
+// tell it where #preview is, in physical pixels relative to the WebView.
+let previewVisible = false;
+let lastRect = "";
+
+function reportPreview() {
+  const r = els.preview.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const radius = parseFloat(getComputedStyle(els.preview).borderTopLeftRadius) || 0;
+  const rect = {
+    x: Math.round(r.left * dpr),
+    y: Math.round(r.top * dpr),
+    width: Math.round(r.width * dpr),
+    height: Math.round(r.height * dpr),
+    radius: radius * dpr,
+    visible: previewVisible,
+  };
+  const key = JSON.stringify(rect);
+  if (key === lastRect) return;
+  lastRect = key;
+  invoke("set_preview_rect", { rect }).catch(() => {
+    lastRect = "";
+  });
+}
+
+if (window.ResizeObserver) new ResizeObserver(reportPreview).observe(els.preview);
+window.addEventListener("resize", reportPreview);
+
+// Camera switches while running, one at a time, in order.
+let cameraQueue = Promise.resolve();
+function applyCamera() {
+  if (!running) return;
+  cameraQueue = cameraQueue
+    .then(() => invoke("set_camera", { camera: cameraConfig() }))
+    .catch(() => {
+      /* kept by the app, shown through status */
+    });
 }
 
 function showError(msg) {
@@ -183,14 +273,7 @@ els.toggle.addEventListener("click", async () => {
           keepScreenOn: settings.keepScreenOn,
           gain: settings.gain / 100,
           muted: settings.muted,
-          camera: cameraOn()
-            ? {
-                lens: settings.lens,
-                ...(RESOLUTIONS[settings.resolution] || RESOLUTIONS[720]),
-                fps: CAMERA_FPS,
-                orientation: settings.orientation,
-              }
-            : null,
+          camera: cameraConfig(),
         },
       });
     }
@@ -250,14 +333,38 @@ els.camera.addEventListener("change", () => {
   settings.camera = els.camera.checked;
   save();
   renderHint();
+  renderControls();
+  renderCamera(camera);
+  applyCamera();
+});
+
+function renderLens() {
+  els.lens.value = settings.lens;
+  els.flip.setAttribute(
+    "aria-label",
+    settings.lens === "front" ? "Switch to the back camera" : "Switch to the front camera",
+  );
+}
+
+els.flip.addEventListener("click", () => {
+  settings.lens = settings.lens === "front" ? "back" : "front";
+  save();
+  renderLens();
+  if (cameraOn()) applyCamera();
 });
 
 for (const key of ["lens", "resolution", "orientation"]) {
   els[key].addEventListener("change", () => {
     settings[key] = key === "resolution" ? Number(els[key].value) : els[key].value;
     save();
+    renderLens();
+    if (cameraOn()) applyCamera();
   });
 }
+
+els.cameraSettings.addEventListener("click", () => {
+  invoke("open_app_settings").catch((e) => showError(String(e)));
+});
 
 // ------------------------------------------------------------------ init
 transportInputs.forEach((i) => (i.checked = i.value === settings.transport));
@@ -265,13 +372,14 @@ els.port.value = settings.port;
 els.source.value = settings.source;
 els.keepScreen.checked = settings.keepScreenOn;
 els.camera.checked = settings.camera;
-els.lens.value = settings.lens;
+renderLens();
 els.resolution.value = String(settings.resolution);
 els.orientation.value = settings.orientation;
 renderMute();
 renderGain();
 renderHint();
 renderControls();
+renderCamera(camera);
 
 // One status request at a time: overlapping IPC calls pile up when the
 // WebView is busy.

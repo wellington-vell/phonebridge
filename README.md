@@ -106,6 +106,9 @@ phonebridge --wifi 192.168.1.23 --camera # over Wi-Fi
 phonebridge --camera --no-mic            # webcam only
 ```
 
+In the background, `phonebridge camera toggle` starts or stops the webcam on its
+own, next to the microphone ([background control](#background-control)).
+
 The phone opens its camera only while the PC is connected. The video is decoded
 by `ffmpeg` (bundled with the Nix package) and written to a v4l2loopback device,
 which apps see as a normal webcam. Load the module once (on NixOS use the
@@ -122,24 +125,53 @@ orientation changes on the phone apply on the next connection.
 
 ### Background control
 
-`phonebridge` also manages a detached instance of itself, with desktop notifications:
+`phonebridge` also manages detached instances of itself, with desktop
+notifications. The microphone and the webcam run as **separate instances**, so
+each can be switched on and off on its own:
 
 ```
-phonebridge toggle            start in the background, or stop it if running
+phonebridge toggle            start the microphone in the background, or stop it
 phonebridge start [OPTIONS]   start in the background (OPTIONS as above)
 phonebridge stop
 phonebridge mute              mute / unmute (the input stays available and sends
                         silence; also `kill -USR1 <pid>`)
 phonebridge status            print connected | muted | connecting | off
+
+phonebridge camera toggle     start the webcam alone in the background, or stop it
+phonebridge camera start [OPTIONS]
+                              the same with options (runs `--camera --no-mic`)
+phonebridge camera stop
+phonebridge camera status     print streaming | connecting | off
+phonebridge camera device     print the webcam device, e.g. /dev/video10
 ```
 
-The Nix package ships a **Phonebridge** desktop entry that runs `phonebridge toggle`.
-Logs go to `$XDG_RUNTIME_DIR/phonebridge/phonebridge.log`.
+The camera instance only forwards the video port over adb and the microphone
+instance only the control port, so they don't step on each other. Don't also
+pass `--camera` to the microphone instance (both would claim the same webcam).
 
-### Noctalia bar toggle
+**Default options.** `start` and `toggle` (and `camera start` / `camera toggle`)
+without options read them from `$XDG_CONFIG_HOME/phonebridge/args`
+(`~/.config/phonebridge/args`): whitespace-separated, `#` starts a comment. Use
+it for the transport, so desktop and bar toggles connect over Wi-Fi:
+
+```sh
+mkdir -p ~/.config/phonebridge
+echo "--wifi 192.168.1.23" > ~/.config/phonebridge/args
+```
+
+Keep to options that both instances accept (`--wifi`, `--port`, `--no-adb`);
+`--bluetooth` works for the microphone only.
+
+The Nix package ships a **Phonebridge** desktop entry that runs `phonebridge toggle`.
+Logs go to `$XDG_RUNTIME_DIR/phonebridge/phonebridge.log` (microphone) and
+`camera.log` (webcam) next to it.
+
+### Noctalia bar widgets
 
 The package ships a [Noctalia](https://github.com/noctalia-dev/noctalia) plugin
-under `share/noctalia-plugins/phonebridge`:
+under `share/noctalia-plugins/phonebridge` with two bar widgets.
+
+Microphone (`wellington-vell/phonebridge:toggle`):
 
 | Gesture | Action |
 |---------|--------|
@@ -149,13 +181,25 @@ under `share/noctalia-plugins/phonebridge`:
 
 The icon is highlighted when live, red when muted and crossed out when off.
 
+Webcam (`wellington-vell/phonebridge:camera`):
+
+| Gesture | Action |
+|---------|--------|
+| Left click | start / stop the webcam |
+| Right click | while streaming, preview it (`mpv`, `ffplay` or `vlc`, whichever is installed) |
+| Middle click | follow the camera log in a terminal |
+
+The icon is highlighted while streaming, tinted while waiting for the phone and
+crossed out when off. Both widgets run without options, so set the transport in
+the [default options](#background-control) file if you don't use USB.
+
 ```nix
 plugins.enabled = [ "wellington-vell/phonebridge" ];
 plugins.source = [
   # declaring sources replaces the defaults — re-list official/community too
   { name = "phonebridge"; kind = "path"; location = "${phonebridge}/share/noctalia-plugins"; enabled = true; }
 ];
-bar.default.end = [ "wellington-vell/phonebridge:toggle" ];
+bar.default.end = [ "wellington-vell/phonebridge:toggle" "wellington-vell/phonebridge:camera" ];
 ```
 
 ### NixOS
@@ -189,8 +233,10 @@ speaks it).
   voice call (echo / noise cancelling), unprocessed, voice performance
 - **Volume** slider (0–400 %) with a level meter, and a big **mute** button;
   both apply live, muting sends silence so the PC input stays up
-- **Camera**: share the back or front camera at 480p, 720p or 1080p (30 fps),
-  landscape or portrait, over USB or Wi-Fi
+- **Camera**: live preview pinned at the top of the screen; share the back or
+  front camera at 480p, 720p or 1080p (30 fps), landscape or portrait, over USB
+  or Wi-Fi. Camera settings apply live without interrupting the microphone; if
+  the camera permission is refused the mic still works
 - **Keep screen on while connected**, plus a foreground service so capture
   keeps running with the screen off
 

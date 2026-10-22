@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 
 /**
  * Foreground service that keeps microphone (and camera) capture allowed
@@ -28,8 +29,8 @@ class CaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // The camera opens later, when a PC connects, so the service must
-        // already hold the camera type then. Android 14 throws if we claim it
+        // Called again whenever camera sharing is turned on or off, to update
+        // the service types. Android 14 throws if we claim the camera type
         // without the permission.
         val camera = intent?.getBooleanExtra(EXTRA_CAMERA, false) == true &&
             checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
@@ -56,9 +57,16 @@ class CaptureService : Service() {
             .setOngoing(true)
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            if (camera) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-            startForeground(ID, notification, types)
+            val mic = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            try {
+                startForeground(ID, notification, if (camera) mic or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else mic)
+            } catch (e: SecurityException) {
+                // Camera type refused (e.g. started from the background on
+                // Android 14+): keep the microphone going at least.
+                if (!camera) throw e
+                Log.w("phonebridge", "foreground service without the camera type", e)
+                startForeground(ID, notification, mic)
+            }
         } else {
             startForeground(ID, notification)
         }
