@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::opus::{CHANNELS, RATE};
 
-const SINK: &str = "wemic_sink";
-const SOURCE: &str = "wemic";
+const SINK: &str = "phonebridge_sink";
+const SOURCE: &str = "phonebridge";
 
 pub enum Output {
     Pipe(ChildStdin),

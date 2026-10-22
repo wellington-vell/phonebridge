@@ -1,12 +1,13 @@
 //! Background control: run the client detached and query / signal it.
 //!
-//!   wemic toggle            start, or stop if already running
-//!   wemic start [OPTIONS]   start in the background (OPTIONS go to the client)
-//!   wemic stop
-//!   wemic mute              toggle mute (keeps the "WeMic" input alive)
-//!   wemic status            prints connected | muted | connecting | off
+//!   phonebridge toggle            start, or stop if already running
+//!   phonebridge start [OPTIONS]   start in the background (OPTIONS go to the client,
+//!                                 e.g. --camera)
+//!   phonebridge stop
+//!   phonebridge mute              toggle mute (keeps the "Phonebridge" input alive)
+//!   phonebridge status            prints connected | muted | connecting | off
 //!
-//! State lives in $XDG_RUNTIME_DIR/wemic: wemic.pid, wemic.log and muted.
+//! State lives in $XDG_RUNTIME_DIR/phonebridge: phonebridge.pid, phonebridge.log and muted.
 
 use std::fs::{self, File};
 use std::os::unix::process::CommandExt;
@@ -19,7 +20,7 @@ pub const COMMANDS: &[&str] = &["toggle", "start", "stop", "mute", "status"];
 
 pub fn state_dir() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(dir).join("wemic")
+    PathBuf::from(dir).join("phonebridge")
 }
 
 struct Paths {
@@ -33,8 +34,8 @@ impl Paths {
         let dir = state_dir();
         let _ = fs::create_dir_all(&dir);
         Paths {
-            pid: dir.join("wemic.pid"),
-            log: dir.join("wemic.log"),
+            pid: dir.join("phonebridge.pid"),
+            log: dir.join("phonebridge.log"),
             muted: dir.join("muted"),
         }
     }
@@ -58,13 +59,17 @@ impl Paths {
         }
     }
 
-    /// The last connection event in the log decides: a later "disconnected" wins.
+    /// Connected if the microphone or the camera is live. For each, the last
+    /// of its connection events in the log decides.
     fn connected(&self) -> bool {
         let log = fs::read_to_string(&self.log).unwrap_or_default();
-        log.lines()
-            .rev()
-            .find(|l| l.contains("streaming started") || l.contains("disconnected"))
-            .is_some_and(|l| l.contains("streaming started"))
+        let live = |up: &str, down: &str| {
+            log.lines()
+                .rev()
+                .find(|l| l.contains(up) || l.contains(down))
+                .is_some_and(|l| l.contains(up))
+        };
+        live("streaming started", "disconnected") || live("camera: streaming", "camera: stopped")
     }
 
     fn log_tail(&self, n: usize) -> String {
@@ -75,13 +80,14 @@ impl Paths {
 }
 
 fn notify(critical: bool, title: &str, body: &str) {
-    let icon = std::env::var("WEMIC_ICON").unwrap_or_else(|_| "audio-input-microphone".into());
+    let icon =
+        std::env::var("PHONEBRIDGE_ICON").unwrap_or_else(|_| "audio-input-microphone".into());
     let mut cmd = Command::new("notify-send");
     if critical {
         cmd.args(["-u", "critical"]);
     }
     let _ = cmd
-        .args(["-a", "WeMic", "-i", &icon, title, body])
+        .args(["-a", "Phonebridge", "-i", &icon, title, body])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -99,7 +105,7 @@ fn stop(p: &Paths) -> ExitCode {
     };
     send(pid, libc::SIGTERM);
     let _ = fs::remove_file(&p.pid);
-    notify(false, "WeMic", "Stopped");
+    notify(false, "Phonebridge", "Stopped");
     ExitCode::SUCCESS
 }
 
@@ -125,20 +131,30 @@ fn start(p: &Paths, args: &[String]) -> Result<ExitCode, String> {
     fs::write(&p.pid, child.id().to_string()).map_err(|e| format!("{}: {e}", p.pid.display()))?;
     notify(
         false,
-        "WeMic",
-        "Started. Open WeMic on the phone and press Start.",
+        "Phonebridge",
+        "Started. Open Phonebridge on the phone and press Start.",
     );
 
     // Report the outcome of the handshake once.
     for _ in 0..30 {
         thread::sleep(Duration::from_secs(1));
         if !matches!(child.try_wait(), Ok(None)) {
-            notify(true, "WeMic failed", &p.log_tail(3));
+            notify(true, "Phonebridge failed", &p.log_tail(3));
             let _ = fs::remove_file(&p.pid);
             return Ok(ExitCode::FAILURE);
         }
         if p.connected() {
-            notify(false, "WeMic", "Connected — select the \"WeMic\" input");
+            let has = |o: &str| args.iter().any(|a| a == o);
+            let what = match (has("--camera"), has("--no-mic")) {
+                (true, true) => "webcam",
+                (true, false) => "input and webcam",
+                _ => "input",
+            };
+            notify(
+                false,
+                "Phonebridge",
+                &format!("Connected — select the \"Phonebridge\" {what}"),
+            );
             break;
         }
     }

@@ -4,14 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <title>WeMic</title>
+    <title>Phonebridge</title>
     <link rel="stylesheet" href="style.css" />
     <script src="main.js" defer></script>
   </head>
   <body>
     <main>
       <header>
-        <h1>WeMic</h1>
+        <div>
+          <h1>Phonebridge</h1>
+          <p class="tagline">Your phone as the PC's microphone and webcam</p>
+        </div>
         <span id="status" class="pill" data-state="idle">Stopped</span>
       </header>
 
@@ -67,6 +70,39 @@
         <label class="switch">
           <span>Keep screen on while connected</span>
           <input id="keep-screen" type="checkbox" checked />
+        </label>
+      </section>
+
+      <section id="camera-card" class="card">
+        <h2 class="row"><span>Camera</span><span id="camera-state" class="camera-state">Off</span></h2>
+        <label class="switch">
+          <span>Share camera</span>
+          <input id="camera" type="checkbox" />
+        </label>
+        <p id="camera-note" class="note" hidden>Camera needs USB or Wi‑Fi</p>
+        <p id="camera-error" class="error" hidden></p>
+
+        <label class="field">
+          <span>Camera</span>
+          <select id="lens">
+            <option value="back">Back</option>
+            <option value="front">Front</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Resolution</span>
+          <select id="resolution">
+            <option value="480">480p</option>
+            <option value="720">720p</option>
+            <option value="1080">1080p</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Orientation</span>
+          <select id="orientation">
+            <option value="landscape">Landscape</option>
+            <option value="portrait">Portrait</option>
+          </select>
         </label>
       </section>
     </main>

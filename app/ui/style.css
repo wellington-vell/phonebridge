@@ -275,3 +275,34 @@ input[type="range"] {
 .hint p {
   margin: 0 0 6px;
 }
+
+.tagline {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.camera-state {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+.camera-state[data-state="streaming"] {
+  color: var(--live);
+}
+.camera-state[data-state="listening"] {
+  color: var(--wait);
+}
+#camera-card .switch,
+#camera-card .note,
+#camera-card .error {
+  margin: 0 0 12px;
+}
+.note {
+  font-size: 14px;
+  color: var(--muted);
+}
+.field select:disabled,
+.switch input:disabled {
+  opacity: 0.5;
+}

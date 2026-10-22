@@ -4,7 +4,7 @@ use opus_head_sys as ffi;
 use std::ffi::{CStr, c_int};
 
 pub const RATE: i32 = 48000;
-/// 20 ms @ 48 kHz, what the WeMic client expects.
+/// 20 ms @ 48 kHz, what the Phonebridge client expects.
 pub const FRAME: usize = 960;
 const BITRATE: i32 = 64000;
 

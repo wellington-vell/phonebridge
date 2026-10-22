@@ -1,4 +1,4 @@
-package io.github.wellingtonvell.wemic
+package io.github.wellingtonvell.phonebridge
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -15,12 +15,12 @@ import kotlin.concurrent.thread
 /**
  * RFCOMM server that relays each Bluetooth client to the Rust server on
  * 127.0.0.1:port, so the protocol code is the same for every transport.
- * The wemic Linux client finds the channel through SDP using [SERVICE_UUID].
+ * The phonebridge Linux client finds the channel through SDP using [SERVICE_UUID].
  */
 class BluetoothBridge(private val adapter: BluetoothAdapter, private val port: Int) {
     companion object {
         val SERVICE_UUID: UUID = UUID.fromString("aabe3790-b3b9-400f-8a50-e9b0f38ac6b0")
-        private const val TAG = "wemic"
+        private const val TAG = "phonebridge"
     }
 
     @Volatile private var running = true
@@ -31,9 +31,9 @@ class BluetoothBridge(private val adapter: BluetoothAdapter, private val port: I
     @SuppressLint("MissingPermission")
     fun start() {
         // Secure (authenticated, encrypted) socket: only paired devices.
-        val s = adapter.listenUsingRfcommWithServiceRecord("WeMic", SERVICE_UUID)
+        val s = adapter.listenUsingRfcommWithServiceRecord("Phonebridge", SERVICE_UUID)
         server = s
-        thread(name = "wemic-bt-accept") {
+        thread(name = "phonebridge-bt-accept") {
             while (running) {
                 val bt = try {
                     s.accept()
@@ -61,7 +61,7 @@ class BluetoothBridge(private val adapter: BluetoothAdapter, private val port: I
     }
 
     private fun pump(input: InputStream, output: OutputStream, close: () -> Unit) =
-        thread(name = "wemic-bt-relay") {
+        thread(name = "phonebridge-bt-relay") {
             val buf = ByteArray(4096)
             try {
                 while (true) {

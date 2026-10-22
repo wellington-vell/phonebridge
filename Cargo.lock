@@ -19,6 +19,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
+name = "phonebridge"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "signal-hook",
+]
+
+[[package]]
 name = "signal-hook"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -36,14 +44,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "wemic"
-version = "0.1.0"
-dependencies = [
- "libc",
- "signal-hook",
 ]
 
 [[package]]

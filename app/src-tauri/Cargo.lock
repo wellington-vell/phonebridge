@@ -2216,6 +2216,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "phonebridge-app"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ndk-sys",
+ "opus-head-sys",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3872,19 +3885,6 @@ dependencies = [
  "thiserror 2.0.21",
  "windows",
  "windows-core",
-]
-
-[[package]]
-name = "wemic-app"
-version = "0.1.0"
-dependencies = [
- "libc",
- "ndk-sys",
- "opus-head-sys",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
 ]
 
 [[package]]

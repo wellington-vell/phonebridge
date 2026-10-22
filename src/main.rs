@@ -1,6 +1,10 @@
-//! WeMic: Linux client for the WO Mic protocol (USB, Wi-Fi and Bluetooth).
+//! Phonebridge: use an Android phone as a microphone and webcam on Linux.
 //!
-//! Protocol reverse engineered from WOMicClient.exe 6.3:
+//! The microphone speaks the WO Mic protocol (USB, Wi-Fi and Bluetooth) and
+//! feeds a PipeWire virtual mic. The camera is a separate H.264 stream (USB and
+//! Wi-Fi) decoded into a v4l2loopback webcam; see `video.rs`.
+//!
+//! Audio protocol reverse engineered from WOMicClient.exe 6.3:
 //!
 //!   Transport (USB): `adb forward tcp:P tcp:P`, then TCP to 127.0.0.1:P.
 //!   Transport (Wi-Fi): TCP to phone:P; media inline, or UDP if a port is set.
@@ -19,7 +23,7 @@
 use std::fs;
 use std::io;
 use std::net::UdpSocket;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,23 +39,24 @@ mod opus;
 mod output;
 mod proto;
 mod transport;
+mod video;
 
 use transport::{Media, Transport};
 
 macro_rules! log {
-    ($($arg:tt)*) => { eprintln!("[wemic] {}", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { eprintln!("[phonebridge] {}", format_args!($($arg)*)) };
 }
 pub(crate) use log;
 
 const USAGE: &str = "\
-usage: wemic [OPTIONS]                 run the client in the foreground
-       wemic toggle                   start in the background, or stop it
-       wemic start [OPTIONS]          start in the background
-       wemic stop
-       wemic mute                     toggle mute (the input stays, sending silence)
-       wemic status                   print connected | muted | connecting | off
+usage: phonebridge [OPTIONS]                 run the client in the foreground
+       phonebridge toggle                   start in the background, or stop it
+       phonebridge start [OPTIONS]          start in the background
+       phonebridge stop
+       phonebridge mute                     toggle mute (the input stays, sending silence)
+       phonebridge status                   print connected | muted | connecting | off
 
-WeMic client for Linux (USB via adb, Wi-Fi or Bluetooth)
+Use your Android phone as a microphone and webcam (USB via adb, Wi-Fi or Bluetooth)
 
 options:
   --port PORT        control port (default 8125)
@@ -59,11 +64,18 @@ options:
   --udp PORT         Wi-Fi: receive media on this UDP port (default: inline TCP)
   --bluetooth ADDR   connect over Bluetooth to the paired phone AA:BB:CC:DD:EE:FF
   --bt-channel N     Bluetooth: RFCOMM channel (default: looked up with SDP)
-  --name NAME        virtual microphone name (default \"WeMic\")
+  --name NAME        virtual microphone name (default \"Phonebridge\")
   --stdout           write raw s16le 48k mono PCM to stdout instead
-  --no-adb           USB: skip adb forward (port already forwarded)
-  --once             exit on disconnect instead of retrying
-  -h, --help         show this help";
+  --no-adb           USB: skip adb forward (ports already forwarded)
+  --once             exit on the first disconnect (of either stream) instead of retrying
+  -h, --help         show this help
+
+webcam (USB or Wi-Fi; needs ffmpeg and the v4l2loopback kernel module):
+  --camera           also stream the phone's camera to a v4l2loopback webcam
+  --no-mic           camera only: no audio connection, no virtual microphone
+  --video-port PORT  video port (default: control port + 1, i.e. 8126)
+  --video-device DEV v4l2loopback device (default: the one labelled \"Phonebridge\",
+                     else the first v4l2loopback device)";
 
 struct Args {
     port: u16,
@@ -73,6 +85,16 @@ struct Args {
     stdout: bool,
     no_adb: bool,
     once: bool,
+    mic: bool,
+    camera: bool,
+    video_port: Option<u16>,
+    video_device: Option<PathBuf>,
+}
+
+impl Args {
+    fn video_port(&self) -> u16 {
+        self.video_port.unwrap_or(self.port.wrapping_add(1))
+    }
 }
 
 fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -80,10 +102,14 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
         port: 8125,
         transport: Transport::Usb,
         udp: 0,
-        name: "WeMic".into(),
+        name: "Phonebridge".into(),
         stdout: false,
         no_adb: false,
         once: false,
+        mic: true,
+        camera: false,
+        video_port: None,
+        video_device: None,
     };
     let mut it = argv;
     while let Some(arg) = it.next() {
@@ -130,6 +156,13 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
             "--stdout" => a.stdout = true,
             "--no-adb" => a.no_adb = true,
             "--once" => a.once = true,
+            "--camera" => a.camera = true,
+            "--no-mic" => a.mic = false,
+            "--video-port" => {
+                let v = value()?;
+                a.video_port = Some(v.parse().map_err(|_| format!("invalid video port: {v}"))?);
+            }
+            "--video-device" => a.video_device = Some(value()?.into()),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 process::exit(0);
@@ -140,6 +173,23 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     if a.udp != 0 && !matches!(a.transport, Transport::Wifi(_)) {
         return Err("--udp only works with --wifi".into());
     }
+    if !a.camera {
+        if !a.mic {
+            return Err("--no-mic needs --camera (nothing to stream otherwise)".into());
+        }
+        if a.video_port.is_some() || a.video_device.is_some() {
+            return Err("--video-port and --video-device need --camera".into());
+        }
+    }
+    if a.camera && matches!(a.transport, Transport::Bluetooth(..)) {
+        return Err("--camera works over USB or Wi-Fi, not Bluetooth".into());
+    }
+    if !a.mic && (a.stdout || a.udp != 0) {
+        return Err("--stdout and --udp are audio options; drop --no-mic".into());
+    }
+    if a.camera && a.mic && a.video_port() == a.port {
+        return Err("--video-port must differ from --port".into());
+    }
     if !matches!(a.transport, Transport::Usb) {
         a.no_adb = true;
     }
@@ -149,7 +199,7 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
 // --------------------------------------------------------------------------- mute
 /// SIGUSR1 toggles mute. While muted, silence is sent so the source stays alive.
 ///
-/// State is mirrored to $XDG_RUNTIME_DIR/wemic/muted for status queries.
+/// State is mirrored to $XDG_RUNTIME_DIR/phonebridge/muted for status queries.
 struct Mute {
     on: AtomicBool,
     flag: PathBuf,
@@ -196,7 +246,9 @@ impl Mute {
 struct Cleanup {
     mute: Mute,
     children: Mutex<Vec<Child>>,
-    adb_port: Option<u16>,
+    /// The camera's ffmpeg, replaced on every connection by the video thread.
+    video: Mutex<Option<Child>>,
+    adb_ports: Vec<u16>,
     done: AtomicBool,
 }
 
@@ -209,20 +261,13 @@ impl Cleanup {
         if self.mute.is_on() {
             self.mute.toggle();
         }
+        let video = self.video.lock().unwrap().take();
         let children = std::mem::take(&mut *self.children.lock().unwrap());
-        for mut c in children {
-            // SAFETY: plain kill(2) on a pid we spawned and have not reaped.
-            unsafe { libc::kill(c.id() as libc::pid_t, libc::SIGTERM) };
-            for _ in 0..20 {
-                if !matches!(c.try_wait(), Ok(None)) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-        if let Some(port) = self.adb_port {
+        video
+            .into_iter()
+            .chain(children)
+            .for_each(video::stop_child);
+        for port in &self.adb_ports {
             let _ = adb(&["forward", "--remove", &format!("tcp:{port}")]);
         }
         true
@@ -251,7 +296,7 @@ fn adb(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn setup_adb(port: u16) -> Result<(), String> {
+fn setup_adb(ports: &[u16]) -> Result<(), String> {
     let devices = adb(&["devices"]).map_err(|e| {
         if e.contains("No such file") {
             "adb not found (nix-shell -p android-tools)".into()
@@ -268,8 +313,15 @@ fn setup_adb(port: u16) -> Result<(), String> {
             "no adb device; enable USB debugging and accept the prompt on the phone".into(),
         );
     }
-    adb(&["forward", &format!("tcp:{port}"), &format!("tcp:{port}")])?;
-    log!("adb forward tcp:{port} ready");
+    for (i, port) in ports.iter().enumerate() {
+        if let Err(e) = adb(&["forward", &format!("tcp:{port}"), &format!("tcp:{port}")]) {
+            for done in &ports[..i] {
+                let _ = adb(&["forward", "--remove", &format!("tcp:{done}")]);
+            }
+            return Err(e);
+        }
+        log!("adb forward tcp:{port} ready");
+    }
     Ok(())
 }
 
@@ -359,13 +411,34 @@ fn stream(
 // --------------------------------------------------------------------------- main
 fn run(args: Args) -> Result<ExitCode, String> {
     let mut dec = opus::Decoder::new()?;
+    let video = if args.camera {
+        Some(video::Config {
+            transport: args.transport.clone(),
+            port: args.video_port(),
+            device: match &args.video_device {
+                Some(d) => d.clone(),
+                None => video::find_device(Path::new("/sys/class/video4linux"))?,
+            },
+            once: args.once,
+        })
+    } else {
+        None
+    };
+    let mut ports = Vec::new();
+    if args.mic {
+        ports.push(args.port);
+    }
+    if let Some(v) = &video {
+        ports.push(v.port);
+    }
     if !args.no_adb {
-        setup_adb(args.port)?;
+        setup_adb(&ports)?;
     }
     let cleanup = Arc::new(Cleanup {
         mute: Mute::new(),
         children: Mutex::new(Vec::new()),
-        adb_port: (!args.no_adb).then_some(args.port),
+        video: Mutex::new(None),
+        adb_ports: if args.no_adb { Vec::new() } else { ports },
         done: AtomicBool::new(false),
     });
 
@@ -383,7 +456,29 @@ fn run(args: Args) -> Result<ExitCode, String> {
         }
     });
 
+    // The camera has its own reconnect loop; when it ends for good (--once or
+    // a fatal error) the whole client exits, as it does for audio.
+    let video_loop =
+        |cfg: video::Config, c: &Cleanup| video::run(&cfg, &c.video).map(|()| ExitCode::FAILURE);
+    let video = match video {
+        Some(cfg) if args.mic => {
+            let c = Arc::clone(&cleanup);
+            thread::spawn(move || {
+                if let Err(e) = video_loop(cfg, &c) {
+                    log!("{e}");
+                }
+                c.finish();
+                process::exit(1);
+            });
+            None
+        }
+        other => other,
+    };
+
     let result = (|| {
+        if let Some(cfg) = video {
+            return video_loop(cfg, &cleanup);
+        }
         let mut out = if args.stdout {
             output::Output::Stdout(io::stdout())
         } else {

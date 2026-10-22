@@ -1,13 +1,14 @@
-# WeMic
+# Phonebridge
 
-Use your Android phone as a microphone on Linux. This is an independent client
-that speaks the [WO Mic](https://wolicheng.com/womic) protocol over **USB**
+Use your Android phone as a **microphone and webcam** on Linux. The client
+speaks the [WO Mic](https://wolicheng.com/womic) audio protocol over **USB**
 (through `adb`), **Wi-Fi** or **Bluetooth** and exposes the phone as a PipeWire
-virtual microphone named **"WeMic"**.
+virtual microphone named **"Phonebridge"**. With `--camera` it also streams the
+phone's camera (H.264, USB or Wi-Fi) into a v4l2loopback **webcam**.
 
-On the phone, use the [WeMic Android app](#android-app) in `app/` (Tauri), which
-adds a volume slider, a mute button, audio source selection and keep-screen-on,
-or the official WO Mic app.
+On the phone, use the [Phonebridge Android app](#android-app) in `app/` (Tauri),
+which adds camera sharing, a volume slider, a mute button, audio source
+selection and keep-screen-on. The official WO Mic app works for audio only.
 
 The protocol was reverse engineered from the official Windows client
 (`WOMicClient.exe` 6.3). No Windows code is included or needed.
@@ -18,8 +19,9 @@ The protocol was reverse engineered from the official Windows client
 - `adb` (Android platform tools) for USB
 - BlueZ for Bluetooth
 - `libopus`
+- For the webcam: `ffmpeg` and the `v4l2loopback` kernel module
 - Rust toolchain (to build without Nix)
-- On the phone: the WeMic app in `app/`, or the official WO Mic app
+- On the phone: the Phonebridge app in `app/`, or the official WO Mic app
 
 With Nix all of these are provided for you.
 
@@ -37,7 +39,7 @@ With Nix all of these are provided for you.
    cargo run --release
    ```
 
-4. Select **WeMic** as the input device in your apps (or `wpctl set-default`).
+4. Select **Phonebridge** as the input device in your apps (or `wpctl set-default`).
 
 Stop with `Ctrl+C`. The client reconnects automatically if the phone app stops
 or the cable is unplugged.
@@ -48,7 +50,7 @@ Phone and PC on the same network; select **Wi-Fi** in the phone app and use the
 address it shows:
 
 ```sh
-wemic --wifi 192.168.1.23
+phonebridge --wifi 192.168.1.23
 ```
 
 Media comes over the same TCP connection by default. `--udp PORT` asks the phone
@@ -61,7 +63,7 @@ select **Bluetooth** in the phone app, then use the phone's address from
 `bluetoothctl devices`:
 
 ```sh
-wemic --bluetooth AA:BB:CC:DD:EE:FF
+phonebridge --bluetooth AA:BB:CC:DD:EE:FF
 ```
 
 The RFCOMM channel is found through SDP (service UUID
@@ -76,38 +78,68 @@ with `--bt-channel N`.
 --udp PORT         Wi-Fi: receive media on this UDP port (default: inline TCP)
 --bluetooth ADDR   connect over Bluetooth to the paired phone
 --bt-channel N     Bluetooth: RFCOMM channel (default: looked up with SDP)
---name NAME        name of the virtual microphone (default "WeMic")
+--name NAME        name of the virtual microphone (default "Phonebridge")
 --stdout           write raw s16le / 48 kHz / mono PCM to stdout instead
 --no-adb           USB: don't run `adb forward` (port already forwarded)
---once             exit on disconnect instead of retrying
+--once             exit on the first disconnect (of either stream) instead of retrying
+--camera           also stream the phone's camera to a v4l2loopback webcam
+--no-mic           camera only: no audio connection, no virtual microphone
+--video-port PORT  video port (default: control port + 1, i.e. 8126)
+--video-device DEV v4l2loopback device (default: the one labelled "Phonebridge",
+                   else the first v4l2loopback device)
 ```
 
 Quick test, playing the phone straight to your speakers:
 
 ```sh
-wemic --stdout --once | pw-play --raw --rate 48000 --channels 1 --format s16 -
+phonebridge --stdout --once | pw-play --raw --rate 48000 --channels 1 --format s16 -
 ```
+
+### Webcam
+
+Turn on **Share camera** in the phone app (USB or Wi-Fi; Bluetooth is too slow
+for video), pick the camera, resolution and orientation, press **Start**, then:
+
+```sh
+phonebridge --camera                     # mic + webcam over USB
+phonebridge --wifi 192.168.1.23 --camera # over Wi-Fi
+phonebridge --camera --no-mic            # webcam only
+```
+
+The phone opens its camera only while the PC is connected. The video is decoded
+by `ffmpeg` (bundled with the Nix package) and written to a v4l2loopback device,
+which apps see as a normal webcam. Load the module once (on NixOS use the
+[module](#nixos) instead):
+
+```sh
+sudo modprobe v4l2loopback video_nr=10 card_label=Phonebridge exclusive_caps=1
+```
+
+To make it permanent, put those options in `/etc/modprobe.d/` and
+`v4l2loopback` in `/etc/modules-load.d/`. With `exclusive_caps=1`, browsers list
+the camera only while Phonebridge is streaming into it. Resolution or
+orientation changes on the phone apply on the next connection.
 
 ### Background control
 
-`wemic` also manages a detached instance of itself, with desktop notifications:
+`phonebridge` also manages a detached instance of itself, with desktop notifications:
 
 ```
-wemic toggle            start in the background, or stop it if running
-wemic start [OPTIONS]   start in the background (OPTIONS as above)
-wemic stop
-wemic mute              mute / unmute (the input stays available and sends
+phonebridge toggle            start in the background, or stop it if running
+phonebridge start [OPTIONS]   start in the background (OPTIONS as above)
+phonebridge stop
+phonebridge mute              mute / unmute (the input stays available and sends
                         silence; also `kill -USR1 <pid>`)
-wemic status            print connected | muted | connecting | off
+phonebridge status            print connected | muted | connecting | off
 ```
 
-The Nix package ships a **WeMic** desktop entry that runs `wemic toggle`.
-Logs go to `$XDG_RUNTIME_DIR/wemic/wemic.log`.
+The Nix package ships a **Phonebridge** desktop entry that runs `phonebridge toggle`.
+Logs go to `$XDG_RUNTIME_DIR/phonebridge/phonebridge.log`.
 
 ### Noctalia bar toggle
 
 The package ships a [Noctalia](https://github.com/noctalia-dev/noctalia) plugin
-under `share/noctalia-plugins/wemic`:
+under `share/noctalia-plugins/phonebridge`:
 
 | Gesture | Action |
 |---------|--------|
@@ -118,25 +150,31 @@ under `share/noctalia-plugins/wemic`:
 The icon is highlighted when live, red when muted and crossed out when off.
 
 ```nix
-plugins.enabled = [ "wellington-vell/wemic" ];
+plugins.enabled = [ "wellington-vell/phonebridge" ];
 plugins.source = [
   # declaring sources replaces the defaults — re-list official/community too
-  { name = "wemic"; kind = "path"; location = "${wemic}/share/noctalia-plugins"; enabled = true; }
+  { name = "phonebridge"; kind = "path"; location = "${phonebridge}/share/noctalia-plugins"; enabled = true; }
 ];
-bar.default.end = [ "wellington-vell/wemic:toggle" ];
+bar.default.end = [ "wellington-vell/phonebridge:toggle" ];
 ```
 
 ### NixOS
 
 ```nix
 # flake.nix
-inputs.wemic.url = "github:wellington-vell/wo-mic-linux";
+inputs.phonebridge.url = "github:wellington-vell/wo-mic-linux";
 
 # configuration
-environment.systemPackages = [
-  inputs.wemic.packages.${pkgs.stdenv.hostPlatform.system}.default
-];
+imports = [ inputs.phonebridge.nixosModules.default ];
+programs.phonebridge = {
+  enable = true;          # installs the client
+  camera.enable = true;   # default: v4l2loopback webcam labelled "Phonebridge"
+  camera.videoNr = 10;    # default: /dev/video10
+};
 ```
+
+`phonebridge start --camera` (or `toggle --camera`) runs the webcam in the
+background too; the desktop entry and Noctalia widget start the microphone only.
 
 ## Android app
 
@@ -146,19 +184,22 @@ speaks it).
 
 - **Transport**: USB, Wi-Fi or Bluetooth (RFCOMM, paired devices only)
 - **Control port**: any port; USB/Bluetooth listen on localhost only, Wi-Fi on
-  all interfaces (the screen shows the matching `wemic` command and addresses)
+  all interfaces (the screen shows the matching `phonebridge` command and addresses)
 - **Audio source**: microphone, camcorder, voice recognition (no processing),
   voice call (echo / noise cancelling), unprocessed, voice performance
 - **Volume** slider (0–400 %) with a level meter, and a big **mute** button;
   both apply live, muting sends silence so the PC input stays up
+- **Camera**: share the back or front camera at 480p, 720p or 1080p (30 fps),
+  landscape or portrait, over USB or Wi-Fi
 - **Keep screen on while connected**, plus a foreground service so capture
   keeps running with the screen off
 
 Capture (AAudio), Opus encoding (vendored libopus) and the protocol are in Rust
 (`app/src-tauri/src`); the UI is plain HTML/JS (`app/ui`). A small Kotlin plugin
-(`app/src-tauri/gen/android/app/src/main/java/.../WemicPlugin.kt`) handles
+(`app/src-tauri/gen/android/app/src/main/java/.../PhonebridgePlugin.kt`) handles
 permissions, keep-screen-on, the foreground service and the Bluetooth bridge,
-which relays each RFCOMM client to the Rust server on localhost.
+which relays each RFCOMM client to the Rust server on localhost. The camera
+(Camera2 → MediaCodec H.264) and its video server are in `CameraStreamer.kt`.
 
 ### Building
 
@@ -179,11 +220,11 @@ before installing. Requires Android 9 or newer.
 
 On a desktop, `cargo tauri dev` runs the same app with a 440 Hz test tone in
 place of the microphone, which is handy for trying the client without a phone:
-`wemic --wifi 127.0.0.1` (select Wi-Fi first).
+`phonebridge --wifi 127.0.0.1` (select Wi-Fi first).
 
 ## Protocol
 
-Everything runs over a single stream: TCP to `127.0.0.1:<port>` after
+Audio runs over a single stream: TCP to `127.0.0.1:<port>` after
 `adb forward tcp:<port> tcp:<port>` (USB), TCP to `<phone>:<port>` (Wi-Fi) or
 RFCOMM (Bluetooth).
 
@@ -221,6 +262,26 @@ side sends or expects it otherwise.
 Unknown / not implemented: the meaning of the `flags` byte, how the official
 app's Wi-Fi and Bluetooth modes differ from the above (only tested against the
 app in `app/`), and the older (< v4) media frame format.
+
+### Video
+
+A separate TCP stream on the video port (control port + 1, default 8126;
+`adb forward` for USB, the phone's address for Wi-Fi). Phone side is the
+server, one client at a time. Big-endian:
+
+```
+PC → phone   "PBV1"
+phone → PC   "PBV1" [status u8][codec u8][width u16][height u16][rotation u16][fps u8]
+             on status != 0: [msg_len u16][UTF-8 message], then close
+phone → PC   repeated: [len u32][pts_us u64][flags u8][len bytes of H.264 Annex-B]
+```
+
+- `codec` 1 = H.264 Annex-B; `flags` bit 0 = keyframe, bit 1 = codec config.
+- Each client first gets the SPS/PPS (codec config), then a keyframe; keyframes
+  repeat every 2 s with SPS/PPS prepended.
+- `rotation`: degrees clockwise to rotate the decoded image upright (from the
+  sensor orientation and the orientation chosen in the app; not mirrored).
+- `status` 2 = camera unavailable. When camera sharing is off, nothing listens.
 
 ## Disclaimer
 

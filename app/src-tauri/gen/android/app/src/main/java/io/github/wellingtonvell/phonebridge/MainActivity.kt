@@ -1,4 +1,4 @@
-package io.github.wellingtonvell.wemic
+package io.github.wellingtonvell.phonebridge
 
 import android.os.Bundle
 import android.view.View

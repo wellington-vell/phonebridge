@@ -21,12 +21,12 @@ pub enum Transport {
 impl Transport {
     pub fn hint(&self) -> &'static str {
         match self {
-            Transport::Usb => "is WeMic (or WO Mic) started on the phone with transport=USB?",
+            Transport::Usb => "is Phonebridge (or WO Mic) started on the phone with transport=USB?",
             Transport::Wifi(_) => {
-                "is WeMic (or WO Mic) started on the phone with transport=Wi-Fi, on the same network?"
+                "is Phonebridge (or WO Mic) started on the phone with transport=Wi-Fi, on the same network?"
             }
             Transport::Bluetooth(..) => {
-                "is the phone paired and WeMic started with transport=Bluetooth?"
+                "is the phone paired and Phonebridge started with transport=Bluetooth?"
             }
         }
     }

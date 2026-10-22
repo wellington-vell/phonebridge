@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "WeMic",
+  "productName": "Phonebridge",
   "version": "0.1.0",
-  "identifier": "io.github.wellingtonvell.wemic",
+  "identifier": "io.github.wellingtonvell.phonebridge",
   "build": {
     "frontendDist": "../ui"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "WeMic",
+        "title": "Phonebridge",
         "width": 420,
         "height": 820
       }

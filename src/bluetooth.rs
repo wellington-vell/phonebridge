@@ -19,7 +19,7 @@ const BTPROTO_L2CAP: c_int = 0;
 const BTPROTO_RFCOMM: c_int = 3;
 const SDP_PSM: u16 = 1;
 
-/// Service registered by the WeMic Android app.
+/// Service registered by the Phonebridge Android app.
 pub const SERVICE_UUID: [u8; 16] = [
     0xaa, 0xbe, 0x37, 0x90, 0xb3, 0xb9, 0x40, 0x0f, 0x8a, 0x50, 0xe9, 0xb0, 0xf3, 0x8a, 0xc6, 0xb0,
 ];
@@ -192,7 +192,7 @@ pub fn open(addr: &BdAddr, channel: Option<u8>) -> io::Result<File> {
             None => sdp_channel(addr, &SPP_UUID)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
-                    "WeMic service not found on the phone (is the app started with transport=Bluetooth?)",
+                    "Phonebridge service not found on the phone (is the app started with transport=Bluetooth?)",
                 )
             })?,
         },

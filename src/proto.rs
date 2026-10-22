@@ -48,7 +48,7 @@ fn recv_reply(sock: &mut impl Read, expected: u8) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Extension of the WeMic Android app: a hello reply ending in this marker
+/// Extension of the Phonebridge Android app: a hello reply ending in this marker
 /// asks for a `KEEPALIVE` message every second after start, so the phone
 /// notices a PC that vanished without closing the connection.
 const KEEPALIVE_MARKER: &[u8] = b"wmka";

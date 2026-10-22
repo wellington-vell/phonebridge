@@ -1,11 +1,11 @@
 [package]
-name = "wemic-app"
+name = "phonebridge-app"
 version = "0.1.0"
-description = "Use your Android phone as a microphone for the wemic Linux client"
+description = "Use your Android phone as a microphone and webcam for the phonebridge Linux client"
 edition = "2024"
 
 [lib]
-name = "wemic_app_lib"
+name = "phonebridge_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

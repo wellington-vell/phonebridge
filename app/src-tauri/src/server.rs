@@ -5,7 +5,7 @@
 //!     0x65 hello   <- 04 06 03 00 00 00     -> [status 0][media version 4]
 //!     0x66 codec   <- 02 02 [UDP port u32]  -> [status 0]
 //!     0x67 start   <-                       -> [status 0]
-//!   Extension: the hello reply ends with "wmka", telling the WeMic client to
+//!   Extension: the hello reply ends with "wmka", telling the Phonebridge client to
 //!   send 0x70 keepalives (empty payload) every second after start. A client
 //!   that sent one and then goes quiet for KEEPALIVE_TIMEOUT is dropped, so a
 //!   PC that vanished without closing the connection (suspend, Wi-Fi drop,
@@ -100,7 +100,7 @@ impl Shared {
 
     fn fail(&self, e: impl std::fmt::Display) {
         let msg = e.to_string();
-        eprintln!("[wemic] {msg}");
+        eprintln!("[phonebridge] {msg}");
         self.update(|s| s.error = Some(msg));
     }
 }
@@ -204,7 +204,7 @@ fn start_session(
             Arc::clone(&cancel),
         );
         thread::Builder::new()
-            .name("wemic-session".into())
+            .name("phonebridge-session".into())
             .spawn(move || {
                 if let Err(e) = session(sock, &peer, &shared, &*on_connected, &cancel)
                     && !cancel.load(Ordering::Relaxed)

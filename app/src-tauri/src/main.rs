@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    wemic_app_lib::run()
+    phonebridge_app_lib::run()
 }

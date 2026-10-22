@@ -1,6 +1,7 @@
-//! WeMic for Android: turns the phone into a microphone for the WeMic Linux
+//! Phonebridge for Android: turns the phone into a microphone for the Phonebridge Linux
 //! client (and anything else speaking the WO Mic protocol) over USB, Wi-Fi
-//! or Bluetooth.
+//! or Bluetooth, and into a webcam (H.264 on control port + 1) over USB or
+//! Wi-Fi.
 
 mod capture;
 mod encoder;
@@ -13,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 
 use capture::Source;
@@ -39,6 +41,21 @@ struct StartConfig {
     keep_screen_on: bool,
     gain: f32,
     muted: bool,
+    /// Camera sharing, or None when off.
+    camera: Option<CameraConfig>,
+}
+
+/// Camera sharing settings, passed through to CameraStreamer.kt.
+#[derive(Deserialize)]
+pub struct CameraConfig {
+    /// "back" or "front".
+    pub lens: String,
+    pub width: u16,
+    pub height: u16,
+    pub fps: u8,
+    /// "landscape" or "portrait": how the phone is held, for the rotation
+    /// the PC applies.
+    pub orientation: String,
 }
 
 #[derive(Serialize)]
@@ -57,6 +74,8 @@ struct StatusReply {
     gain: f32,
     transport: Option<Transport>,
     addresses: Vec<Address>,
+    /// From CameraStreamer.kt: {state, peer?, error?, width?, height?}.
+    camera: Value,
 }
 
 fn stop_worker(app: &AppHandle, state: &App) {
@@ -67,10 +86,11 @@ fn stop_worker(app: &AppHandle, state: &App) {
     if worker.transport == Transport::Bluetooth {
         platform.stop_bluetooth();
     }
+    platform.stop_camera();
     state.shared.stop.store(true, Ordering::Relaxed);
     let _ = worker.thread.join();
     platform.keep_screen_on(false);
-    platform.service(false);
+    platform.service(false, false);
 }
 
 #[tauri::command]
@@ -79,8 +99,24 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
     if config.port == 0 {
         return Err("invalid control port".into());
     }
+    let camera_port = match &config.camera {
+        None => None,
+        // Too slow for video.
+        Some(_) if config.transport == Transport::Bluetooth => {
+            return Err("camera sharing needs USB or Wi-Fi".into());
+        }
+        Some(_) => Some(
+            config
+                .port
+                .checked_add(1)
+                .ok_or("the control port must be below 65535 to share the camera")?,
+        ),
+    };
     let platform = app.state::<Platform>();
-    platform.request_permissions(config.transport == Transport::Bluetooth)?;
+    platform.request_permissions(
+        config.transport == Transport::Bluetooth,
+        config.camera.is_some(),
+    )?;
 
     let shared = &state.shared;
     shared.stop.store(false, Ordering::Relaxed);
@@ -92,14 +128,14 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
         .store(config.keep_screen_on, Ordering::Relaxed);
     shared.status.lock().unwrap().error = None;
 
-    platform.service(true);
+    platform.service(true, config.camera.is_some());
     let thread = {
         let shared = Arc::clone(shared);
         let keep = Arc::clone(&state.keep_screen_on);
         let app = app.clone();
         let (transport, port) = (config.transport, config.port);
         thread::Builder::new()
-            .name("wemic-server".into())
+            .name("phonebridge-server".into())
             .spawn(move || {
                 let on_connected = move |connected: bool| {
                     if !connected || keep.load(Ordering::Relaxed) {
@@ -117,6 +153,12 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
 
     if config.transport == Transport::Bluetooth
         && let Err(e) = platform.start_bluetooth(config.port)
+    {
+        stop_worker(&app, &state);
+        return Err(e);
+    }
+    if let (Some(cam), Some(port)) = (&config.camera, camera_port)
+        && let Err(e) = platform.start_camera(port, config.transport == Transport::Usb, cam)
     {
         stop_worker(&app, &state);
         return Err(e);
@@ -153,10 +195,12 @@ fn set_keep_screen_on(app: AppHandle, state: State<'_, App>, on: bool) {
     }
 }
 
+/// Async so the Android plugin call for the camera status runs off the main
+/// thread.
 #[tauri::command]
-fn status(state: State<'_, App>) -> StatusReply {
+async fn status(app: AppHandle, state: State<'_, App>) -> Result<StatusReply, String> {
     let shared = &state.shared;
-    StatusReply {
+    Ok(StatusReply {
         status: shared.status(),
         level: shared.level(),
         muted: shared.muted.load(Ordering::Relaxed),
@@ -166,16 +210,17 @@ fn status(state: State<'_, App>) -> StatusReply {
             .into_iter()
             .map(|(interface, ip)| Address { interface, ip })
             .collect(),
-    }
+        camera: app.state::<Platform>().camera_status(),
+    })
 }
 
 fn platform_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    tauri::plugin::Builder::new("wemic")
+    tauri::plugin::Builder::new("phonebridge")
         .setup(|app, _api| {
             #[cfg(target_os = "android")]
             app.manage(Platform(_api.register_android_plugin(
-                "io.github.wellingtonvell.wemic",
-                "WemicPlugin",
+                "io.github.wellingtonvell.phonebridge",
+                "PhonebridgePlugin",
             )?));
             #[cfg(not(target_os = "android"))]
             app.manage(Platform);

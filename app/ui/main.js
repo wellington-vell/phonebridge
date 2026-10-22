@@ -14,6 +14,13 @@ const els = {
   source: $("source"),
   keepScreen: $("keep-screen"),
   hint: $("hint"),
+  camera: $("camera"),
+  cameraState: $("camera-state"),
+  cameraNote: $("camera-note"),
+  cameraError: $("camera-error"),
+  lens: $("lens"),
+  resolution: $("resolution"),
+  orientation: $("orientation"),
 };
 const transportInputs = [...document.querySelectorAll('input[name="transport"]')];
 
@@ -25,11 +32,23 @@ const DEFAULTS = {
   keepScreenOn: true,
   gain: 100,
   muted: false,
+  camera: false,
+  lens: "back",
+  resolution: 720,
+  orientation: "landscape",
 };
+
+// 16:9 sizes asked of the camera; the phone picks the closest it supports.
+const RESOLUTIONS = {
+  480: { width: 854, height: 480 },
+  720: { width: 1280, height: 720 },
+  1080: { width: 1920, height: 1080 },
+};
+const CAMERA_FPS = 30;
 
 function load() {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem("wemic") || "{}") };
+    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem("phonebridge") || "{}") };
   } catch {
     return { ...DEFAULTS };
   }
@@ -39,7 +58,7 @@ const settings = load();
 
 function save() {
   try {
-    localStorage.setItem("wemic", JSON.stringify(settings));
+    localStorage.setItem("phonebridge", JSON.stringify(settings));
   } catch {
     /* storage unavailable: settings last for this session only */
   }
@@ -60,25 +79,28 @@ function renderGain() {
   els.gainValue.textContent = `${settings.gain}%`;
 }
 
+// Video is too slow over Bluetooth.
+const cameraOn = () => settings.camera && settings.transport !== "bluetooth";
+
 function renderHint() {
   const port = settings.port;
-  const portArg = port === 8125 ? "" : ` --port ${port}`;
+  const portArg = (port === 8125 ? "" : ` --port ${port}`) + (cameraOn() ? " --camera" : "");
   let html;
   switch (settings.transport) {
     case "usb":
       html = `<p>Enable USB debugging, plug the phone in and run on the PC:</p>
-        <code>wemic${portArg}</code>`;
+        <code>phonebridge${portArg}</code>`;
       break;
     case "wifi": {
       const ips = addresses.length ? addresses.map((a) => a.ip) : ["PHONE_IP"];
       html = `<p>Same network as the PC. Run on the PC:</p>
-        ${ips.map((ip) => `<code>wemic --wifi ${ip}${portArg}</code>`).join("")}`;
+        ${ips.map((ip) => `<code>phonebridge --wifi ${ip}${portArg}</code>`).join("")}`;
       break;
     }
     case "bluetooth":
       html = `<p>Pair the phone with the PC first, then run (phone address from
         <em>bluetoothctl devices</em>):</p>
-        <code>wemic --bluetooth AA:BB:CC:DD:EE:FF</code>`;
+        <code>phonebridge --bluetooth AA:BB:CC:DD:EE:FF</code>`;
       break;
   }
   els.hint.innerHTML = html;
@@ -90,6 +112,27 @@ function renderControls() {
   // Transport and port only apply when (re)starting.
   els.port.disabled = running;
   transportInputs.forEach((i) => (i.disabled = running));
+  // Camera settings too; the camera is USB / Wi-Fi only.
+  const bluetooth = settings.transport === "bluetooth";
+  els.camera.disabled = running || bluetooth;
+  [els.lens, els.resolution, els.orientation].forEach((el) => (el.disabled = running || bluetooth));
+  els.cameraNote.hidden = !bluetooth;
+}
+
+const CAMERA_LABEL = {
+  off: "Off",
+  listening: "Waiting for PC",
+  streaming: "Streaming",
+};
+
+function renderCamera(cam) {
+  const state = cam && CAMERA_LABEL[cam.state] ? cam.state : "off";
+  let label = CAMERA_LABEL[state];
+  if (state === "streaming" && cam.width) label += ` ${cam.width}×${cam.height}`;
+  els.cameraState.textContent = label;
+  els.cameraState.dataset.state = state;
+  els.cameraError.hidden = !cam?.error;
+  els.cameraError.textContent = cam?.error || "";
 }
 
 function showError(msg) {
@@ -112,6 +155,7 @@ async function poll() {
     els.status.dataset.state = s.state;
     els.level.style.width = `${Math.min(100, Math.sqrt(s.level) * 100)}%`;
     showError(s.error);
+    renderCamera(s.camera);
     const ips = JSON.stringify(s.addresses);
     if (ips !== JSON.stringify(addresses)) {
       addresses = s.addresses;
@@ -139,6 +183,14 @@ els.toggle.addEventListener("click", async () => {
           keepScreenOn: settings.keepScreenOn,
           gain: settings.gain / 100,
           muted: settings.muted,
+          camera: cameraOn()
+            ? {
+                lens: settings.lens,
+                ...(RESOLUTIONS[settings.resolution] || RESOLUTIONS[720]),
+                fps: CAMERA_FPS,
+                orientation: settings.orientation,
+              }
+            : null,
         },
       });
     }
@@ -168,6 +220,7 @@ transportInputs.forEach((input) =>
     settings.transport = input.value;
     save();
     renderHint();
+    renderControls();
   }),
 );
 
@@ -193,11 +246,28 @@ els.keepScreen.addEventListener("change", () => {
   invoke("set_keep_screen_on", { on: settings.keepScreenOn });
 });
 
+els.camera.addEventListener("change", () => {
+  settings.camera = els.camera.checked;
+  save();
+  renderHint();
+});
+
+for (const key of ["lens", "resolution", "orientation"]) {
+  els[key].addEventListener("change", () => {
+    settings[key] = key === "resolution" ? Number(els[key].value) : els[key].value;
+    save();
+  });
+}
+
 // ------------------------------------------------------------------ init
 transportInputs.forEach((i) => (i.checked = i.value === settings.transport));
 els.port.value = settings.port;
 els.source.value = settings.source;
 els.keepScreen.checked = settings.keepScreenOn;
+els.camera.checked = settings.camera;
+els.lens.value = settings.lens;
+els.resolution.value = String(settings.resolution);
+els.orientation.value = settings.orientation;
 renderMute();
 renderGain();
 renderHint();

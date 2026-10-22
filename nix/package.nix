@@ -8,9 +8,10 @@
   pipewire,
   libopus,
   libnotify,
+  ffmpeg-headless,
 }:
 rustPlatform.buildRustPackage {
-  pname = "wemic";
+  pname = "phonebridge";
   version = "0.1.0";
 
   src = lib.fileset.toSource {
@@ -19,7 +20,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
-      ../assets/wemic.png
+      ../assets/phonebridge.png
       ../noctalia
     ];
   };
@@ -33,39 +34,47 @@ rustPlatform.buildRustPackage {
   buildInputs = [ libopus ];
 
   postInstall = ''
-    wrapProgram $out/bin/wemic \
-      --prefix PATH : ${lib.makeBinPath [ android-tools pipewire libnotify ]} \
-      --set-default WEMIC_ICON $out/share/icons/hicolor/512x512/apps/wemic.png
-    install -Dm644 assets/wemic.png $out/share/icons/hicolor/512x512/apps/wemic.png
+    wrapProgram $out/bin/phonebridge \
+      --prefix PATH : ${lib.makeBinPath [
+        android-tools
+        pipewire
+        libnotify
+        ffmpeg-headless
+      ]} \
+      --set-default PHONEBRIDGE_ICON $out/share/icons/hicolor/512x512/apps/phonebridge.png
+    install -Dm644 assets/phonebridge.png $out/share/icons/hicolor/512x512/apps/phonebridge.png
     # Noctalia bar toggle: point a `path` plugin source at share/noctalia-plugins.
     mkdir -p $out/share/noctalia-plugins
-    cp -r noctalia/wemic $out/share/noctalia-plugins/wemic
+    cp -r noctalia/phonebridge $out/share/noctalia-plugins/phonebridge
   '';
 
   desktopItems = [
     (makeDesktopItem {
-      name = "wemic";
-      desktopName = "WeMic";
-      comment = "Use your Android phone as a microphone (toggle)";
-      exec = "wemic toggle";
-      icon = "wemic";
+      name = "phonebridge";
+      desktopName = "Phonebridge";
+      comment = "Use your Android phone as a microphone and webcam (toggle)";
+      exec = "phonebridge toggle";
+      icon = "phonebridge";
       categories = [
         "AudioVideo"
         "Audio"
+        "Video"
       ];
       keywords = [
         "microphone"
+        "webcam"
+        "camera"
         "android"
-        "wemic"
+        "phonebridge"
       ];
     })
   ];
 
   meta = {
-    description = "WeMic client for Linux (USB, Wi-Fi or Bluetooth; PipeWire virtual microphone)";
+    description = "Use your Android phone as a microphone and webcam on Linux (PipeWire virtual mic, v4l2loopback webcam)";
     homepage = "https://github.com/wellington-vell/wo-mic-linux";
     license = lib.licenses.mit;
-    mainProgram = "wemic";
+    mainProgram = "phonebridge";
     platforms = lib.platforms.linux;
   };
 }

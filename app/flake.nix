@@ -1,5 +1,5 @@
 {
-  description = "WeMic for Android (Tauri) — development shell";
+  description = "Phonebridge for Android (Tauri) — development shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
