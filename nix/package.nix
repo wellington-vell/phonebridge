@@ -74,7 +74,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Use your Android phone as a microphone and webcam on Linux (PipeWire virtual mic, v4l2loopback webcam)";
-    homepage = "https://github.com/wellington-vell/wo-mic-linux";
+    homepage = "https://github.com/wellington-vell/phonebridge";
     license = lib.licenses.mit;
     mainProgram = "phonebridge";
     platforms = lib.platforms.linux;

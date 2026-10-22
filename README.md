@@ -34,7 +34,7 @@ With Nix all of these are provided for you.
 3. On the PC:
 
    ```sh
-   nix run github:wellington-vell/wo-mic-linux
+   nix run github:wellington-vell/phonebridge
    # or, without Nix (needs libopus development files)
    cargo run --release
    ```
@@ -237,7 +237,7 @@ bar.default.end = [ "wellington-vell/phonebridge:toggle" "wellington-vell/phoneb
 
 ```nix
 # flake.nix
-inputs.phonebridge.url = "github:wellington-vell/wo-mic-linux";
+inputs.phonebridge.url = "github:wellington-vell/phonebridge";
 
 # configuration
 imports = [ inputs.phonebridge.nixosModules.default ];
