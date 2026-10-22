@@ -22,6 +22,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.lock
       ../src
       ../assets/phonebridge.png
+      ../assets/phonebridge.svg
       ../noctalia
     ];
   };
@@ -45,6 +46,7 @@ rustPlatform.buildRustPackage {
       --set-default PHONEBRIDGE_ICON $out/share/icons/hicolor/512x512/apps/phonebridge.png \
       --set-default PHONEBRIDGE_FONT ${dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf
     install -Dm644 assets/phonebridge.png $out/share/icons/hicolor/512x512/apps/phonebridge.png
+    install -Dm644 assets/phonebridge.svg $out/share/icons/hicolor/scalable/apps/phonebridge.svg
     # Noctalia bar toggle: point a `path` plugin source at share/noctalia-plugins.
     mkdir -p $out/share/noctalia-plugins
     cp -r noctalia/phonebridge $out/share/noctalia-plugins/phonebridge
