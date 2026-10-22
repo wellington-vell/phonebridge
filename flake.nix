@@ -1,5 +1,5 @@
 {
-  description = "WO Mic client for Linux";
+  description = "WeMic client for Linux";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -13,8 +13,8 @@
     in
     {
       packages = forAll (system: rec {
-        wo-mic-linux = nixpkgs.legacyPackages.${system}.callPackage ./nix/package.nix { };
-        default = wo-mic-linux;
+        wemic = nixpkgs.legacyPackages.${system}.callPackage ./nix/package.nix { };
+        default = wemic;
       });
 
       devShells = forAll (system: {

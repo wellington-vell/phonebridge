@@ -10,7 +10,7 @@
   libnotify,
 }:
 rustPlatform.buildRustPackage {
-  pname = "wo-mic-linux";
+  pname = "wemic";
   version = "0.1.0";
 
   src = lib.fileset.toSource {
@@ -19,7 +19,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
-      ../assets/womic.png
+      ../assets/wemic.png
       ../noctalia
     ];
   };
@@ -33,22 +33,22 @@ rustPlatform.buildRustPackage {
   buildInputs = [ libopus ];
 
   postInstall = ''
-    wrapProgram $out/bin/womic \
+    wrapProgram $out/bin/wemic \
       --prefix PATH : ${lib.makeBinPath [ android-tools pipewire libnotify ]} \
-      --set-default WOMIC_ICON $out/share/icons/hicolor/512x512/apps/wo-mic.png
-    install -Dm644 assets/womic.png $out/share/icons/hicolor/512x512/apps/wo-mic.png
+      --set-default WEMIC_ICON $out/share/icons/hicolor/512x512/apps/wemic.png
+    install -Dm644 assets/wemic.png $out/share/icons/hicolor/512x512/apps/wemic.png
     # Noctalia bar toggle: point a `path` plugin source at share/noctalia-plugins.
     mkdir -p $out/share/noctalia-plugins
-    cp -r noctalia/womic $out/share/noctalia-plugins/womic
+    cp -r noctalia/wemic $out/share/noctalia-plugins/wemic
   '';
 
   desktopItems = [
     (makeDesktopItem {
-      name = "wo-mic";
-      desktopName = "WO Mic";
+      name = "wemic";
+      desktopName = "WeMic";
       comment = "Use your Android phone as a microphone (toggle)";
-      exec = "womic toggle";
-      icon = "wo-mic";
+      exec = "wemic toggle";
+      icon = "wemic";
       categories = [
         "AudioVideo"
         "Audio"
@@ -56,16 +56,16 @@ rustPlatform.buildRustPackage {
       keywords = [
         "microphone"
         "android"
-        "womic"
+        "wemic"
       ];
     })
   ];
 
   meta = {
-    description = "WO Mic client for Linux (USB via adb, PipeWire virtual microphone)";
+    description = "WeMic client for Linux (USB, Wi-Fi or Bluetooth; PipeWire virtual microphone)";
     homepage = "https://github.com/wellington-vell/wo-mic-linux";
     license = lib.licenses.mit;
-    mainProgram = "womic";
+    mainProgram = "wemic";
     platforms = lib.platforms.linux;
   };
 }

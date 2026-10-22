@@ -1,12 +1,12 @@
 //! Background control: run the client detached and query / signal it.
 //!
-//!   womic toggle            start, or stop if already running
-//!   womic start [OPTIONS]   start in the background (OPTIONS go to the client)
-//!   womic stop
-//!   womic mute              toggle mute (keeps the "WO Mic" input alive)
-//!   womic status            prints connected | muted | connecting | off
+//!   wemic toggle            start, or stop if already running
+//!   wemic start [OPTIONS]   start in the background (OPTIONS go to the client)
+//!   wemic stop
+//!   wemic mute              toggle mute (keeps the "WeMic" input alive)
+//!   wemic status            prints connected | muted | connecting | off
 //!
-//! State lives in $XDG_RUNTIME_DIR/womic: womic.pid, womic.log and muted.
+//! State lives in $XDG_RUNTIME_DIR/wemic: wemic.pid, wemic.log and muted.
 
 use std::fs::{self, File};
 use std::os::unix::process::CommandExt;
@@ -19,7 +19,7 @@ pub const COMMANDS: &[&str] = &["toggle", "start", "stop", "mute", "status"];
 
 pub fn state_dir() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(dir).join("womic")
+    PathBuf::from(dir).join("wemic")
 }
 
 struct Paths {
@@ -33,8 +33,8 @@ impl Paths {
         let dir = state_dir();
         let _ = fs::create_dir_all(&dir);
         Paths {
-            pid: dir.join("womic.pid"),
-            log: dir.join("womic.log"),
+            pid: dir.join("wemic.pid"),
+            log: dir.join("wemic.log"),
             muted: dir.join("muted"),
         }
     }
@@ -75,13 +75,13 @@ impl Paths {
 }
 
 fn notify(critical: bool, title: &str, body: &str) {
-    let icon = std::env::var("WOMIC_ICON").unwrap_or_else(|_| "audio-input-microphone".into());
+    let icon = std::env::var("WEMIC_ICON").unwrap_or_else(|_| "audio-input-microphone".into());
     let mut cmd = Command::new("notify-send");
     if critical {
         cmd.args(["-u", "critical"]);
     }
     let _ = cmd
-        .args(["-a", "WO Mic", "-i", &icon, title, body])
+        .args(["-a", "WeMic", "-i", &icon, title, body])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -99,7 +99,7 @@ fn stop(p: &Paths) -> ExitCode {
     };
     send(pid, libc::SIGTERM);
     let _ = fs::remove_file(&p.pid);
-    notify(false, "WO Mic", "Stopped");
+    notify(false, "WeMic", "Stopped");
     ExitCode::SUCCESS
 }
 
@@ -125,20 +125,20 @@ fn start(p: &Paths, args: &[String]) -> Result<ExitCode, String> {
     fs::write(&p.pid, child.id().to_string()).map_err(|e| format!("{}: {e}", p.pid.display()))?;
     notify(
         false,
-        "WO Mic",
-        "Started. Open WO Mic on the phone (Transport: USB) and press Start.",
+        "WeMic",
+        "Started. Open WeMic on the phone and press Start.",
     );
 
     // Report the outcome of the handshake once.
     for _ in 0..30 {
         thread::sleep(Duration::from_secs(1));
         if !matches!(child.try_wait(), Ok(None)) {
-            notify(true, "WO Mic failed", &p.log_tail(3));
+            notify(true, "WeMic failed", &p.log_tail(3));
             let _ = fs::remove_file(&p.pid);
             return Ok(ExitCode::FAILURE);
         }
         if p.connected() {
-            notify(false, "WO Mic", "Connected — select the \"WO Mic\" input");
+            notify(false, "WeMic", "Connected — select the \"WeMic\" input");
             break;
         }
     }

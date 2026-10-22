@@ -1,14 +1,14 @@
--- Bar toggle for wo-mic-linux. State comes from `womic status`.
+-- Bar toggle for wemic. State comes from `wemic status`.
 --   left click:   start when off, otherwise mute / unmute
 --   right click:  start / stop
 --   middle click: follow the log in a terminal
 local state = "off"
 
 local looks = {
-  connected = { glyph = "microphone", color = "primary", tip = "WO Mic: live — click to mute, right-click to stop" },
-  muted = { glyph = "microphone-mute", color = "error", tip = "WO Mic: muted — click to unmute, right-click to stop" },
-  connecting = { glyph = "microphone", color = "tertiary", tip = "WO Mic: waiting for phone — right-click to stop" },
-  off = { glyph = "microphone-off", color = "on_surface_variant", tip = "WO Mic: off — click to start" },
+  connected = { glyph = "microphone", color = "primary", tip = "WeMic: live — click to mute, right-click to stop" },
+  muted = { glyph = "microphone-mute", color = "error", tip = "WeMic: muted — click to unmute, right-click to stop" },
+  connecting = { glyph = "microphone", color = "tertiary", tip = "WeMic: waiting for phone — right-click to stop" },
+  off = { glyph = "microphone-off", color = "on_surface_variant", tip = "WeMic: off — click to start" },
 }
 
 local function render()
@@ -19,7 +19,7 @@ local function render()
 end
 
 local function refresh()
-  noctalia.runAsync({ "womic", "status" }, function(result)
+  noctalia.runAsync({ "wemic", "status" }, function(result)
     local s = string.gsub(result.stdout or "", "%s+", "")
     if looks[s] and s ~= state then
       state = s
@@ -34,9 +34,9 @@ local function run(cmd, optimistic)
   render()
   if cmd == "start" then
     -- Detached: start blocks until the handshake finishes.
-    noctalia.runAsync({ "womic", cmd })
+    noctalia.runAsync({ "wemic", cmd })
   else
-    noctalia.runAsync({ "womic", cmd }, function()
+    noctalia.runAsync({ "wemic", cmd }, function()
       refresh()
     end)
   end
@@ -69,5 +69,5 @@ function onRightClick()
 end
 
 function onMiddleClick()
-  noctalia.runInTerminal("tail -f \"${XDG_RUNTIME_DIR:-/tmp}/womic/womic.log\"")
+  noctalia.runInTerminal("tail -f \"${XDG_RUNTIME_DIR:-/tmp}/wemic/wemic.log\"")
 end

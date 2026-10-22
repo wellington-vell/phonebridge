@@ -1,12 +1,14 @@
-//! WO Mic Linux client (USB mode).
+//! WeMic: Linux client for the WO Mic protocol (USB, Wi-Fi and Bluetooth).
 //!
 //! Protocol reverse engineered from WOMicClient.exe 6.3:
 //!
 //!   Transport (USB): `adb forward tcp:P tcp:P`, then TCP to 127.0.0.1:P.
+//!   Transport (Wi-Fi): TCP to phone:P; media inline, or UDP if a port is set.
+//!   Transport (Bluetooth): RFCOMM, channel found through SDP.
 //!   Control messages (both directions): [type u8][len u32 BE][payload len bytes]
 //!     0x65 hello       -> payload 04 06 03 00 00 00
 //!                      <- payload [status u8][media version u8][...]
-//!     0x66 set codec   -> payload 02 02 [media UDP port u32 BE]  (0 for USB)
+//!     0x66 set codec   -> payload 02 02 [media UDP port u32 BE]  (0: inline)
 //!                      <- payload [status u8][...]
 //!     0x67 start       -> no payload
 //!                      <- payload [status u8][...]
@@ -16,7 +18,7 @@
 
 use std::fs;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::{self, Child, Command, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,36 +29,46 @@ use std::time::Duration;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use signal_hook::iterator::Signals;
 
+mod bluetooth;
 mod control;
 mod opus;
 mod output;
 mod proto;
+mod transport;
+
+use transport::{Media, Transport};
 
 macro_rules! log {
-    ($($arg:tt)*) => { eprintln!("[womic] {}", format_args!($($arg)*)) };
+    ($($arg:tt)*) => { eprintln!("[wemic] {}", format_args!($($arg)*)) };
 }
 pub(crate) use log;
 
 const USAGE: &str = "\
-usage: womic [OPTIONS]                 run the client in the foreground
-       womic toggle                   start in the background, or stop it
-       womic start [OPTIONS]          start in the background
-       womic stop
-       womic mute                     toggle mute (the input stays, sending silence)
-       womic status                   print connected | muted | connecting | off
+usage: wemic [OPTIONS]                 run the client in the foreground
+       wemic toggle                   start in the background, or stop it
+       wemic start [OPTIONS]          start in the background
+       wemic stop
+       wemic mute                     toggle mute (the input stays, sending silence)
+       wemic status                   print connected | muted | connecting | off
 
-WO Mic client for Linux (USB via adb)
+WeMic client for Linux (USB via adb, Wi-Fi or Bluetooth)
 
 options:
-  --port PORT  control port (default 8125)
-  --name NAME  virtual microphone name (default \"WO Mic\")
-  --stdout     write raw s16le 48k mono PCM to stdout instead
-  --no-adb     skip adb forward (port already forwarded)
-  --once       exit on disconnect instead of retrying
-  -h, --help   show this help";
+  --port PORT        control port (default 8125)
+  --wifi HOST        connect over Wi-Fi to the phone's address instead of USB
+  --udp PORT         Wi-Fi: receive media on this UDP port (default: inline TCP)
+  --bluetooth ADDR   connect over Bluetooth to the paired phone AA:BB:CC:DD:EE:FF
+  --bt-channel N     Bluetooth: RFCOMM channel (default: looked up with SDP)
+  --name NAME        virtual microphone name (default \"WeMic\")
+  --stdout           write raw s16le 48k mono PCM to stdout instead
+  --no-adb           USB: skip adb forward (port already forwarded)
+  --once             exit on disconnect instead of retrying
+  -h, --help         show this help";
 
 struct Args {
     port: u16,
+    transport: Transport,
+    udp: u16,
     name: String,
     stdout: bool,
     no_adb: bool,
@@ -66,7 +78,9 @@ struct Args {
 fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
         port: 8125,
-        name: "WO Mic".into(),
+        transport: Transport::Usb,
+        udp: 0,
+        name: "WeMic".into(),
         stdout: false,
         no_adb: false,
         once: false,
@@ -88,6 +102,30 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
                 let v = value()?;
                 a.port = v.parse().map_err(|_| format!("invalid port: {v}"))?;
             }
+            "--wifi" | "--ip" => a.transport = Transport::Wifi(value()?),
+            "--udp" => {
+                let v = value()?;
+                a.udp = v.parse().map_err(|_| format!("invalid UDP port: {v}"))?;
+            }
+            "--bluetooth" | "--bt" => {
+                let channel = match a.transport {
+                    Transport::Bluetooth(_, c) => c,
+                    _ => None,
+                };
+                a.transport = Transport::Bluetooth(bluetooth::parse_addr(&value()?)?, channel);
+            }
+            "--bt-channel" => {
+                let v = value()?;
+                let c = v
+                    .parse()
+                    .ok()
+                    .filter(|c| (1..=30).contains(c))
+                    .ok_or(format!("invalid RFCOMM channel: {v}"))?;
+                match &mut a.transport {
+                    Transport::Bluetooth(_, channel) => *channel = Some(c),
+                    _ => return Err("--bt-channel needs --bluetooth ADDR first".into()),
+                }
+            }
             "--name" => a.name = value()?,
             "--stdout" => a.stdout = true,
             "--no-adb" => a.no_adb = true,
@@ -99,13 +137,19 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
             _ => return Err(format!("unrecognized argument: {flag}")),
         }
     }
+    if a.udp != 0 && !matches!(a.transport, Transport::Wifi(_)) {
+        return Err("--udp only works with --wifi".into());
+    }
+    if !matches!(a.transport, Transport::Usb) {
+        a.no_adb = true;
+    }
     Ok(a)
 }
 
 // --------------------------------------------------------------------------- mute
 /// SIGUSR1 toggles mute. While muted, silence is sent so the source stays alive.
 ///
-/// State is mirrored to $XDG_RUNTIME_DIR/womic/muted for status queries.
+/// State is mirrored to $XDG_RUNTIME_DIR/wemic/muted for status queries.
 struct Mute {
     on: AtomicBool,
     flag: PathBuf,
@@ -237,19 +281,41 @@ fn stream(
     out: &mut output::Output,
     mute: &Mute,
 ) -> Result<io::Error, String> {
-    let connect = || -> io::Result<TcpStream> {
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, args.port));
-        let mut sock = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
-        sock.set_read_timeout(Some(Duration::from_secs(5)))?;
-        proto::handshake(&mut sock)?;
-        sock.set_read_timeout(Some(Duration::from_secs(10)))?;
-        sock.set_nodelay(true)?;
-        Ok(sock)
+    let connect = || -> io::Result<(transport::Conn, Media, bool)> {
+        let mut conn = transport::connect(&args.transport, args.port)?;
+        conn.set_timeout(Duration::from_secs(5))?;
+        let media = if args.udp != 0 {
+            let sock = UdpSocket::bind(("0.0.0.0", args.udp))?;
+            sock.set_read_timeout(Some(Duration::from_secs(10)))?;
+            Media::Udp(sock, conn.peer_ip())
+        } else {
+            Media::Inline
+        };
+        let session = proto::handshake(&mut conn, args.udp)?;
+        conn.set_timeout(Duration::from_secs(10))?;
+        Ok((conn, media, session.keepalive))
     };
-    let mut sock = match connect() {
-        Ok(s) => s,
+    let (mut conn, mut media, keepalive) = match connect() {
+        Ok(c) => c,
         Err(e) => return Ok(e),
     };
+
+    // Keepalives until this function returns (the flag drops with it).
+    let alive = Arc::new(AtomicBool::new(true));
+    struct Done(Arc<AtomicBool>);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
+        }
+    }
+    let _done = Done(Arc::clone(&alive));
+    if keepalive && let Ok(mut ka) = conn.try_clone() {
+        thread::spawn(move || {
+            while alive.load(Ordering::Relaxed) && proto::keepalive(&mut ka).is_ok() {
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
+    }
 
     let mut bytes = Vec::new();
     let mut emit = |pcm: &[i16], out: &mut output::Output| -> Result<(), String> {
@@ -265,12 +331,16 @@ fn stream(
 
     let mut last_seq: Option<u16> = None;
     loop {
-        let frame = match proto::next_frame(&mut sock) {
+        let frame = match media.next(&mut conn) {
             Ok(f) => f,
             Err(e) => return Ok(e),
         };
         if let Some(last) = last_seq {
-            let lost = frame.seq.wrapping_sub(last).wrapping_sub(1);
+            let ahead = frame.seq.wrapping_sub(last);
+            if ahead == 0 || ahead > 0x8000 {
+                continue; // duplicate or reordered (UDP)
+            }
+            let lost = ahead - 1;
             for _ in 0..lost.min(5) {
                 match dec.decode(None) {
                     Ok(pcm) => emit(pcm, out)?,
@@ -327,7 +397,7 @@ fn run(args: Args) -> Result<ExitCode, String> {
             if args.once {
                 return Ok(ExitCode::FAILURE);
             }
-            log!("retrying in 2s (is WO Mic started on the phone with transport=USB?)");
+            log!("retrying in 2s ({})", args.transport.hint());
             thread::sleep(Duration::from_secs(2));
         }
     })();

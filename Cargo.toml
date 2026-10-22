@@ -1,5 +1,5 @@
 [package]
-name = "womic"
+name = "wemic"
 version = "0.1.0"
 edition = "2024"
 
