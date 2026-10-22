@@ -106,7 +106,22 @@
             <input id="port" type="number" inputmode="numeric" min="1" max="65535" value="8125" />
           </label>
 
+          <div class="pairing">
+            <div class="pairing-head">
+              <span>Pairing code</span>
+              <button id="new-code" class="link-btn" type="button">New code</button>
+            </div>
+            <output id="token" class="token" aria-live="polite">…</output>
+            <p id="token-note" class="note">The PC needs this code to connect. A new code locks out PCs that have the old one.</p>
+          </div>
+
           <div id="hint" class="hint"></div>
+
+          <label class="switch insecure">
+            <span>Allow clients without the pairing code (official WO Mic client, insecure)</span>
+            <input id="allow-unauth" type="checkbox" />
+          </label>
+          <p id="insecure-note" class="note warn" hidden>Anyone who can reach the phone can listen to the microphone while this is on.</p>
         </section>
 
         <section class="card">

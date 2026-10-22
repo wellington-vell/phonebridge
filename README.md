@@ -46,6 +46,30 @@ or the cable is unplugged: over USB it redoes `adb forward` before every
 connection attempt (forwards vanish when the phone is replugged or the adb
 server restarts), and it starts fine without a phone attached, waiting for one.
 
+### Pairing code
+
+The Phonebridge app shows a **pairing code** (`ABCDE-FGHJK-MNPQR-STVWX`). Give it
+to the client and only that phone is accepted, and audio and video are
+encrypted (AES-256-GCM, see [docs/secure-channel.md](docs/secure-channel.md)):
+
+```sh
+phonebridge --token ABCDE-FGHJK-MNPQR-STVWX
+```
+
+Case, dashes and spaces don't matter. Rather than typing it each time, store it
+in `$XDG_CONFIG_HOME/phonebridge/token` (`~/.config/phonebridge/token`), which
+must be yours and private, or set `PHONEBRIDGE_TOKEN`:
+
+```sh
+echo ABCDE-FGHJK-MNPQR-STVWX | install -Dm600 /dev/stdin ~/.config/phonebridge/token
+```
+
+`--token` wins over `PHONEBRIDGE_TOKEN`, which wins over the file. Background
+instances (`phonebridge start --token …`) get the code through their
+environment, so it doesn't show up in `ps`. Without a code the client speaks the
+original plaintext protocol: it works with the official WO Mic app, but anyone
+on the network can listen or pose as the phone, and it says so in the log.
+
 ### Wi-Fi
 
 Phone and PC on the same network; select **Wi-Fi** in the phone app and use the
@@ -56,7 +80,8 @@ phonebridge --wifi 192.168.1.23
 ```
 
 Media comes over the same TCP connection by default. `--udp PORT` asks the phone
-to send it as UDP datagrams to that local port instead (open it in your firewall).
+to send it as UDP datagrams to that local port instead (open it in your firewall);
+the port listens only on the address that reaches the phone.
 
 ### Bluetooth
 
@@ -75,12 +100,16 @@ with `--bt-channel N`.
 ### Options
 
 ```
+--token CODE       pairing code shown in the phone app: authenticates the phone and
+                   encrypts audio and video (also $PHONEBRIDGE_TOKEN or
+                   ~/.config/phonebridge/token)
 --port PORT        control port configured in the phone app (default 8125)
 --wifi HOST        connect over Wi-Fi to the phone's address instead of USB
 --udp PORT         Wi-Fi: receive media on this UDP port (default: inline TCP)
 --bluetooth ADDR   connect over Bluetooth to the paired phone
 --bt-channel N     Bluetooth: RFCOMM channel (default: looked up with SDP)
---name NAME        name of the virtual microphone (default "Phonebridge")
+--name NAME        name of the virtual microphone (default "Phonebridge"; no
+                   " \ { } [ ] = or control characters)
 --stdout           write raw s16le / 48 kHz / mono PCM to stdout instead
 --no-adb           USB: don't run `adb forward` (port already forwarded)
 --once             exit on the first disconnect (of either stream) instead of retrying
@@ -165,6 +194,7 @@ phonebridge stop
 phonebridge mute              mute / unmute (the input stays available and sends
                         silence; also `kill -USR1 <pid>`)
 phonebridge status            print connected | muted | connecting | off
+phonebridge logfile           print the log file (also `camera logfile`)
 
 phonebridge camera toggle     start the webcam alone in the background, or stop it
 phonebridge camera start [OPTIONS]
@@ -191,11 +221,15 @@ echo "--wifi 192.168.1.23" > ~/.config/phonebridge/args
 ```
 
 Keep to options that both instances accept (`--wifi`, `--port`, `--no-adb`);
-`--bluetooth` works for the microphone only.
+`--bluetooth` works for the microphone only. Both instances also read the
+[pairing code](#pairing-code) file, so keep the code there rather than in `args`.
 
 The Nix package ships a **Phonebridge** desktop entry that runs `phonebridge toggle`.
-Logs go to `$XDG_RUNTIME_DIR/phonebridge/phonebridge.log` (microphone) and
-`camera.log` (webcam) next to it.
+Logs, pidfiles and status go to a private directory (mode 0700):
+`$XDG_RUNTIME_DIR/phonebridge`, or `~/.local/state/phonebridge` (or
+`$XDG_STATE_HOME/phonebridge`) when there is no runtime directory. The
+microphone logs to `phonebridge.log`, the webcam to `camera.log`;
+`phonebridge logfile` prints the path.
 
 ### Noctalia bar widgets
 

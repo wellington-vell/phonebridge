@@ -7,6 +7,7 @@ mod capture;
 mod encoder;
 mod net;
 mod platform;
+mod secure;
 mod server;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -19,12 +20,15 @@ use tauri::{AppHandle, Manager, State};
 
 use capture::Source;
 use platform::Platform;
-use server::{Shared, Status, Transport};
+use server::{Auth, Shared, Status, Transport};
 
 struct Worker {
     thread: JoinHandle<()>,
     transport: Transport,
     port: u16,
+    /// Pairing code the servers were started with, display form.
+    token: String,
+    allow_unauthenticated: bool,
 }
 
 struct App {
@@ -39,6 +43,9 @@ struct App {
     /// Why camera sharing could not be turned on. Also held while the camera
     /// is being switched, so switches never overlap.
     camera_error: Mutex<Option<String>>,
+    /// Pairing code on desktop, where there is no Android storage: random
+    /// per run.
+    desktop_token: Mutex<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +57,10 @@ struct StartConfig {
     keep_screen_on: bool,
     gain: f32,
     muted: bool,
+    /// Also accept clients without the pairing code (plaintext, e.g. the
+    /// official WO Mic client).
+    #[serde(default)]
+    allow_unauthenticated: bool,
     /// Camera sharing, or None when off. Can change while running
     /// (set_camera).
     camera: Option<CameraConfig>,
@@ -132,12 +143,15 @@ fn apply_camera(app: &AppHandle, state: &App, cam: Option<&CameraConfig>) -> Res
 }
 
 fn switch_camera(app: &AppHandle, state: &App, cam: Option<&CameraConfig>) -> Result<(), String> {
-    let Some((transport, port)) = state
-        .worker
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|w| (w.transport, w.port))
+    let Some((transport, port, token, allow_unauthenticated)) =
+        state.worker.lock().unwrap().as_ref().map(|w| {
+            (
+                w.transport,
+                w.port,
+                w.token.clone(),
+                w.allow_unauthenticated,
+            )
+        })
     else {
         return Ok(());
     };
@@ -160,7 +174,13 @@ fn switch_camera(app: &AppHandle, state: &App, cam: Option<&CameraConfig>) -> Re
     // The service needs the camera type to keep the camera with the screen
     // off or the app in the background.
     platform.service(true, true);
-    platform.start_camera(video_port, transport == Transport::Usb, cam)?;
+    platform.start_camera(
+        video_port,
+        transport == Transport::Usb,
+        &token,
+        allow_unauthenticated,
+        cam,
+    )?;
     state.camera_started.store(true, Ordering::Relaxed);
     Ok(())
 }
@@ -175,6 +195,11 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
     // The camera's permission is asked for by apply_camera: refusing it only
     // keeps the camera off, the microphone still starts.
     platform.request_permissions(config.transport == Transport::Bluetooth)?;
+    let token = pairing_code(&app, &state, false)?;
+    let auth = Auth {
+        code: secure::canonical(&token).ok_or("invalid pairing code")?,
+        allow_unauthenticated: config.allow_unauthenticated,
+    };
 
     let shared = &state.shared;
     shared.stop.store(false, Ordering::Relaxed);
@@ -213,7 +238,7 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
                     app.state::<Platform>()
                         .keep_screen_on(n > 0, keep.load(Ordering::Relaxed));
                 };
-                server::serve(transport, port, shared, Arc::new(on_connected))
+                server::serve(transport, port, auth, shared, Arc::new(on_connected))
             })
             .map_err(|e| e.to_string())?
     };
@@ -221,6 +246,8 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
         thread,
         transport: config.transport,
         port: config.port,
+        token,
+        allow_unauthenticated: config.allow_unauthenticated,
     });
 
     if config.transport == Transport::Bluetooth
@@ -234,6 +261,45 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
         let _ = apply_camera(&app, &state, Some(cam));
     }
     Ok(())
+}
+
+/// The pairing code from the app's storage (or this run's on desktop),
+/// display form; `reset` replaces it with a new one first.
+fn pairing_code(app: &AppHandle, state: &App, reset: bool) -> Result<String, String> {
+    let platform = app.state::<Platform>();
+    let stored = if reset {
+        platform.reset_token()?
+    } else {
+        platform.get_token()?
+    };
+    let token = match stored {
+        Some(t) => t,
+        None => {
+            let mut t = state.desktop_token.lock().unwrap();
+            if reset || t.is_none() {
+                *t = Some(secure::generate_code().map_err(|e| e.to_string())?);
+            }
+            t.clone().unwrap()
+        }
+    };
+    let canonical = secure::canonical(&token).ok_or("invalid pairing code")?;
+    Ok(secure::display(&canonical))
+}
+
+/// The pairing code the PC needs (`phonebridge --token`).
+#[tauri::command]
+async fn get_token(app: AppHandle, state: State<'_, App>) -> Result<String, String> {
+    pairing_code(&app, &state, false)
+}
+
+/// Make a new pairing code, so PCs with the old one can no longer connect.
+/// Refused while running: the servers keep the code they started with.
+#[tauri::command]
+async fn reset_token(app: AppHandle, state: State<'_, App>) -> Result<String, String> {
+    if state.worker.lock().unwrap().is_some() {
+        return Err("stop before making a new pairing code".into());
+    }
+    pairing_code(&app, &state, true)
 }
 
 /// Turn camera sharing on/off or change its settings while running.
@@ -356,6 +422,7 @@ pub fn run() {
             mic_clients: Arc::new(AtomicUsize::new(0)),
             camera_started: AtomicBool::new(false),
             camera_error: Mutex::new(None),
+            desktop_token: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             start,
@@ -367,6 +434,8 @@ pub fn run() {
             set_camera,
             set_preview_rect,
             open_app_settings,
+            get_token,
+            reset_token,
             status
         ])
         .build(tauri::generate_context!())

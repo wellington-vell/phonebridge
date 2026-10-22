@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::bluetooth::{self, BdAddr};
 use crate::proto::{self, Frame};
+use crate::secure;
 
 #[derive(Clone)]
 pub enum Transport {
@@ -66,6 +67,14 @@ impl Conn {
     pub fn peer_ip(&self) -> Option<std::net::IpAddr> {
         match self {
             Conn::Tcp(s) => s.peer_addr().ok().map(|a| a.ip()),
+            Conn::Rfcomm(_) => None,
+        }
+    }
+
+    /// Our end's IP address, to receive UDP media on that interface only.
+    pub fn local_ip(&self) -> Option<std::net::IpAddr> {
+        match self {
+            Conn::Tcp(s) => s.local_addr().ok().map(|a| a.ip()),
             Conn::Rfcomm(_) => None,
         }
     }
@@ -167,21 +176,26 @@ pub enum Media {
     /// On the control stream.
     Inline,
     /// UDP datagrams from the phone; the control stream stays open alongside.
-    Udp(UdpSocket, Option<std::net::IpAddr>),
+    /// Encrypted when the session is (see `secure`).
+    Udp(UdpSocket, Option<std::net::IpAddr>, Option<secure::Udp>),
 }
 
 impl Media {
-    pub fn next(&mut self, conn: &mut Conn) -> io::Result<Frame> {
+    pub fn next(&mut self, conn: &mut impl Read) -> io::Result<Frame> {
         match self {
             Media::Inline => proto::next_frame(conn),
-            Media::Udp(sock, phone) => {
+            Media::Udp(sock, phone, key) => {
                 let mut buf = [0u8; 2048];
                 loop {
                     let (n, from) = sock.recv_from(&mut buf)?;
                     if phone.is_some_and(|ip| ip != from.ip()) {
                         continue;
                     }
-                    if let Some(frame) = proto::parse_datagram(&buf[..n]) {
+                    let frame = match key {
+                        Some(k) => k.open(&buf[..n]).and_then(|p| proto::parse_datagram(&p)),
+                        None => proto::parse_datagram(&buf[..n]),
+                    };
+                    if let Some(frame) = frame {
                         return Ok(frame);
                     }
                 }

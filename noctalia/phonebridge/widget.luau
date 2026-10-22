@@ -69,5 +69,5 @@ function onRightClick()
 end
 
 function onMiddleClick()
-  noctalia.runInTerminal("tail -f \"${XDG_RUNTIME_DIR:-/tmp}/phonebridge/phonebridge.log\"")
+  noctalia.runInTerminal("tail -f \"$(phonebridge logfile)\"")
 end

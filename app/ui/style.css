@@ -403,6 +403,42 @@ input[type="range"] {
   accent-color: var(--accent);
 }
 
+.pairing {
+  margin-bottom: 12px;
+}
+.pairing-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.link-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.token {
+  display: block;
+  margin: 8px 0 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font: 600 20px/1.3 ui-monospace, "SF Mono", "Roboto Mono", monospace;
+  letter-spacing: 0.04em;
+  text-align: center;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.insecure {
+  margin-top: 12px;
+}
+.note.warn {
+  margin-top: 6px;
+  color: var(--danger);
+}
+
 .hint {
   font-size: 14px;
   color: var(--muted);

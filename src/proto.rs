@@ -28,11 +28,19 @@ fn send_msg(sock: &mut impl Write, mtype: u8, payload: &[u8]) -> io::Result<()> 
     sock.write_all(&msg)
 }
 
+/// Replies are a few bytes; the phone side caps control messages likewise.
+const MAX_REPLY: usize = 64 * 1024;
+
 fn recv_reply(sock: &mut impl Read, expected: u8) -> io::Result<Vec<u8>> {
     let mut hdr = [0u8; 5];
     recv_exact(sock, &mut hdr)?;
     let mtype = hdr[0];
     let len = u32::from_be_bytes(hdr[1..5].try_into().unwrap()) as usize;
+    if len > MAX_REPLY {
+        return Err(err(format!(
+            "reply 0x{mtype:02x} of {len} bytes; not a WO Mic phone?"
+        )));
+    }
     let mut payload = vec![0u8; len];
     recv_exact(sock, &mut payload)?;
     if mtype != expected {
@@ -152,4 +160,20 @@ pub fn parse_datagram(buf: &[u8]) -> Option<Frame> {
         timestamp: h.timestamp,
         opus: buf[HEADER..end].to_vec(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_reply_is_an_error() {
+        let mut r = vec![0x65];
+        r.extend(u32::MAX.to_be_bytes());
+        assert!(recv_reply(&mut io::Cursor::new(r), 0x65).is_err());
+        let mut r = vec![0x65];
+        r.extend(2u32.to_be_bytes());
+        r.extend([0, 4]);
+        assert_eq!(recv_reply(&mut io::Cursor::new(r), 0x65).unwrap(), [0, 4]);
+    }
 }

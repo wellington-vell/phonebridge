@@ -28,13 +28,17 @@ import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
@@ -46,13 +50,16 @@ import kotlin.math.abs
  * the encoder's input Surface (and the on-screen [CameraPreview]), so frames
  * never touch the CPU.
  *
+ *   (PBA1 handshake, then everything below in encrypted records; see
+ *    docs/secure-channel.md and [SecureChannel])
  *   PC -> "PBV1"
  *   phone -> "PBV1" status u8 | codec u8 | width u16 | height u16 | rotation u16 | fps u8
  *            (status != 0: then [msg_len u16][UTF-8 message] and close)
  *   phone -> repeated [len u32][pts_us u64][flags u8][H.264 Annex-B, len bytes]
  *            flags: bit0 keyframe, bit1 codec config (SPS/PPS)
  *
- * All big-endian. One PC at a time; a new one replaces the old. The camera
+ * All big-endian. One PC at a time; a new one replaces the old once it
+ * has authenticated and sent its hello. The camera
  * is open for as long as sharing is on (it feeds the preview); encoder
  * output is dropped while no PC is connected.
  */
@@ -72,6 +79,10 @@ class CameraStreamer(
         val height: Int,
         val fps: Int,
         val portrait: Boolean,
+        /** Canonical pairing code; empty: no PBA1 client is accepted. */
+        val token: String = "",
+        /** Also accept plaintext `PBV1` clients (no pairing code). */
+        val allowUnauthenticated: Boolean = false,
     )
 
     companion object {
@@ -86,6 +97,13 @@ class CameraStreamer(
         private const val MAX_QUEUED = 60
         /** A write stuck this long means the PC is gone without closing. */
         private const val WRITE_TIMEOUT_MS = 5000L
+        /** Per handshake read, and for the whole handshake. */
+        private const val READ_TIMEOUT_MS = 5000
+        private const val HANDSHAKE_DEADLINE_MS = 10_000L
+        /** Delay before closing after a wrong pairing code (slows guessing). */
+        private const val AUTH_FAIL_DELAY_MS = 1000L
+        /** Connections still in their handshake; more are refused at once. */
+        private const val MAX_PENDING = 4
         /** Largest preview stream; the screen is small and it costs bandwidth. */
         private const val MAX_PREVIEW_PIXELS = 1280 * 720
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
@@ -120,6 +138,11 @@ class CameraStreamer(
     @Volatile private var lastError: String? = null
     private val manager = context.getSystemService(CameraManager::class.java)
     private val main = Handler(Looper.getMainLooper())
+    private val pending = Semaphore(MAX_PENDING)
+    /** Closes connections that take too long to authenticate. */
+    private val deadlines = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "phonebridge-cam-deadline").apply { isDaemon = true }
+    }
 
     /** Reopens the camera once another app that took it lets go. */
     private val availability = object : CameraManager.AvailabilityCallback() {
@@ -140,7 +163,8 @@ class CameraStreamer(
 
     /** Binds the video port and opens the camera in the background. Main thread. */
     fun start() {
-        val addr = if (config.localOnly) InetAddress.getByName("127.0.0.1") else null
+        // IPv4 only, like the audio server.
+        val addr = InetAddress.getByName(if (config.localOnly) "127.0.0.1" else "0.0.0.0")
         val s = ServerSocket()
         s.reuseAddress = true
         s.bind(InetSocketAddress(addr, config.port))
@@ -153,7 +177,16 @@ class CameraStreamer(
                 } catch (e: IOException) {
                     break
                 }
-                thread(name = "phonebridge-cam-client") { serve(sock) }
+                if (!pending.tryAcquire()) {
+                    runCatching { sock.close() }
+                    continue
+                }
+                try {
+                    thread(name = "phonebridge-cam-client") { serve(sock) }
+                } catch (e: Throwable) {
+                    pending.release()
+                    runCatching { sock.close() }
+                }
             }
         }
         preview?.consumer = this
@@ -166,6 +199,7 @@ class CameraStreamer(
         running = false
         runCatching { server?.close() }
         runCatching { manager.unregisterAvailabilityCallback(availability) }
+        deadlines.shutdownNow()
         if (preview?.consumer === this) preview.consumer = null
         val s = synchronized(lock) {
             client?.close()
@@ -250,19 +284,62 @@ class CameraStreamer(
         if (s == null) done() else s.dropPreviewSurface(done)
     }
 
+    /** Streams of a connection that passed [handshake]. */
+    private class Hello(val input: InputStream, val output: OutputStream, val secure: Boolean)
+
+    /**
+     * PBA1 (if the client starts with it) and the `PBV1` hello. Null:
+     * refused, the caller closes. Holds a [pending] permit.
+     */
+    private fun handshake(sock: Socket): Hello? {
+        sock.tcpNoDelay = true
+        sock.soTimeout = READ_TIMEOUT_MS
+        val rawIn = sock.getInputStream()
+        val rawOut = sock.getOutputStream()
+        val first = ByteArray(4).also { DataInputStream(rawIn).readFully(it) }
+        return when {
+            first.contentEquals(SecureChannel.MAGIC) -> {
+                if (config.token.isEmpty()) return null
+                val ch = SecureChannel.serverHandshake(rawIn, rawOut, config.token)
+                if (ch == null) {
+                    Log.w(TAG, "camera client ${sock.inetAddress?.hostAddress} sent a wrong pairing code")
+                    Thread.sleep(AUTH_FAIL_DELAY_MS)
+                    return null
+                }
+                val magic = ByteArray(4).also { DataInputStream(ch.input).readFully(it) }
+                if (!magic.contentEquals(MAGIC)) return null
+                Hello(ch.input, ch.output, true)
+            }
+            config.allowUnauthenticated && first.contentEquals(MAGIC) ->
+                Hello(rawIn, BufferedOutputStream(rawOut, 64 * 1024), false)
+            else -> null
+        }
+    }
+
     private fun serve(sock: Socket) {
+        val deadline = runCatching {
+            deadlines.schedule({ runCatching { sock.close() } }, HANDSHAKE_DEADLINE_MS, TimeUnit.MILLISECONDS)
+        }.getOrNull()
+        var expired = true
+        val hello = try {
+            if (deadline == null) null else handshake(sock)
+        } catch (_: IOException) {
+            null
+        } catch (_: InterruptedException) {
+            null
+        } finally {
+            // False once the deadline already closed the socket.
+            expired = deadline?.cancel(false) != true
+            pending.release()
+        }
+        if (hello == null || expired) {
+            runCatching { sock.close() }
+            return
+        }
         val c = Client(sock)
         try {
-            sock.tcpNoDelay = true
-            sock.soTimeout = 5000
-            val hello = ByteArray(4)
-            DataInputStream(sock.getInputStream()).readFully(hello)
-            if (!hello.contentEquals(MAGIC)) {
-                c.close()
-                return
-            }
-            Log.i(TAG, "camera client ${c.peer}")
-            val out = DataOutputStream(BufferedOutputStream(sock.getOutputStream(), 64 * 1024))
+            Log.i(TAG, "camera client ${c.peer}${if (hello.secure) "" else " (no pairing code)"}")
+            val out = DataOutputStream(hello.output)
             val old = synchronized(lock) {
                 if (!running) return
                 client.also { client = c }
@@ -294,6 +371,7 @@ class CameraStreamer(
                 out.writeLong(f.ptsUs)
                 out.writeByte(f.flags)
                 out.write(f.data)
+                // Flushed when caught up, so records are a frame (or a backlog) each.
                 if (c.queue.isEmpty()) out.flush()
                 c.writingSince = 0
             }

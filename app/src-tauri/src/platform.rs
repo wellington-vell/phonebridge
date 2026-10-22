@@ -80,17 +80,33 @@ impl Platform {
         let _ = self.call("stopBluetooth", json!({}));
     }
 
+    /// The pairing code (display form), generated on first use and kept in
+    /// the app's private storage. None on desktop, which has no store.
+    pub fn get_token(&self) -> Result<Option<String>, String> {
+        token_reply(self.call("getToken", json!({}))?)
+    }
+
+    /// Replace the pairing code with a new random one.
+    pub fn reset_token(&self) -> Result<Option<String>, String> {
+        token_reply(self.call("resetToken", json!({}))?)
+    }
+
     /// H.264 camera server on `port`. The camera opens right away (for the
-    /// preview) and stays open until [`Self::stop_camera`].
+    /// preview) and stays open until [`Self::stop_camera`]. Clients must
+    /// prove they know `token` (PBA1) unless `allow_unauthenticated`.
     pub fn start_camera(
         &self,
         port: u16,
         local_only: bool,
+        token: &str,
+        allow_unauthenticated: bool,
         cam: &CameraConfig,
     ) -> Result<(), String> {
         let args = json!({
             "port": port,
             "localOnly": local_only,
+            "token": token,
+            "allowUnauthenticated": allow_unauthenticated,
             "lens": cam.lens,
             "width": cam.width,
             "height": cam.height,
@@ -124,6 +140,18 @@ impl Platform {
     }
 }
 
+/// {"token": "ABCDE-..."} from getToken / resetToken; Null on desktop.
+fn token_reply(reply: Value) -> Result<Option<String>, String> {
+    if reply.is_null() {
+        return Ok(None);
+    }
+    reply
+        .get("token")
+        .and_then(Value::as_str)
+        .map(|t| Some(t.to_string()))
+        .ok_or_else(|| "no pairing code from the app".into())
+}
+
 /// A permission state from requestPermissions; missing means not applicable.
 fn granted(states: &Value, alias: &str) -> bool {
     matches!(
@@ -143,5 +171,16 @@ mod tests {
         assert!(!granted(&states, "camera"));
         assert!(granted(&states, "bluetooth"));
         assert!(!granted(&json!({ "camera": "prompt" }), "camera"));
+    }
+
+    #[test]
+    fn token_replies() {
+        let t = json!({ "token": "ABCDE-FGHJK-MNPQR-STVWX" });
+        assert_eq!(
+            token_reply(t).unwrap().as_deref(),
+            Some("ABCDE-FGHJK-MNPQR-STVWX")
+        );
+        assert_eq!(token_reply(Value::Null).unwrap(), None);
+        assert!(token_reply(json!({})).is_err());
     }
 }

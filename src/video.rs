@@ -31,7 +31,9 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::control::Live;
 use crate::log;
+use crate::secure;
 use crate::transport::{self, Transport};
 
 const MAGIC: &[u8; 4] = b"PBV1";
@@ -67,6 +69,8 @@ pub struct Config {
     pub once: bool,
     /// Fixed webcam size, whatever the phone sends.
     pub size: (u32, u32),
+    /// Canonical pairing code: authenticate and encrypt (see `secure`).
+    pub token: Option<String>,
 }
 
 /// Stream parameters from the phone's reply.
@@ -131,7 +135,11 @@ fn hello(sock: &mut (impl Read + Write)) -> io::Result<Hello> {
     if sock.read_exact(&mut len).is_ok() {
         let mut buf = vec![0u8; u16::from_be_bytes(len) as usize];
         if sock.read_exact(&mut buf).is_ok() {
-            msg = String::from_utf8_lossy(&buf).into_owned();
+            // Goes to the log: one line, no control characters.
+            msg = String::from_utf8_lossy(&buf)
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect();
         }
     }
     Ok(Hello::Refused { status, msg })
@@ -236,14 +244,24 @@ fn strings<const N: usize>(a: [&str; N]) -> Vec<String> {
 /// ends at the first decoded frame instead of waiting for 20 to estimate a
 /// rate we already know. (A tiny -probesize stops before the first full
 /// access unit and fails; -fflags nobuffer was seen dropping frames.)
+///
+/// The stream comes from the network, so the decoder is kept small: only the
+/// native H.264 decoder, one thread, and no single allocation above 64 MiB
+/// (a 4K frame needs ~12 MiB).
 fn decoder_args(info: &Info, size: (u32, u32)) -> Vec<String> {
     let mut a = strings([
         "-hide_banner",
         "-loglevel",
         "warning",
         "-nostdin",
+        "-max_alloc",
+        "67108864",
+        "-threads",
+        "1",
         "-flags",
         "low_delay",
+        "-c:v",
+        "h264",
         "-fpsprobesize",
         "0",
         "-f",
@@ -618,17 +636,19 @@ fn describe(status: Option<ExitStatus>) -> String {
 
 /// Connect and stream until the phone goes away, feeding decoded frames to
 /// the writer. `Err` is fatal (ffmpeg missing).
-fn session(cfg: &Config, procs: &Procs, feed: &Feed) -> Result<Outcome, String> {
-    let mut conn = match transport::connect(&cfg.transport, cfg.port) {
+fn session(cfg: &Config, procs: &Procs, feed: &Feed, live: &Live) -> Result<Outcome, String> {
+    let conn = match transport::connect(&cfg.transport, cfg.port) {
         Ok(c) => c,
         Err(e) => return failed(e),
     };
-    let info = match conn
-        .set_timeout(Duration::from_secs(5))
-        .and_then(|()| hello(&mut conn))
-    {
-        Ok(Hello::Ready(info)) => info,
-        Ok(Hello::Refused { status, msg }) => {
+    let open = || {
+        conn.set_timeout(Duration::from_secs(5))?;
+        let (mut ch, _) = secure::open(conn.try_clone()?, conn, cfg.token.as_deref())?;
+        hello(&mut ch).map(|h| (ch, h))
+    };
+    let (mut ch, info) = match open() {
+        Ok((ch, Hello::Ready(info))) => (ch, info),
+        Ok((_, Hello::Refused { status, msg })) => {
             let why = match status {
                 1 => "camera sharing is disabled on the phone",
                 2 => "camera unavailable on the phone",
@@ -668,6 +688,7 @@ fn session(cfg: &Config, procs: &Procs, feed: &Feed) -> Result<Outcome, String> 
     };
     let mut stdout = stdout.expect("piped stdout");
 
+    live.camera(true);
     let (msg, frames) = thread::scope(|s| {
         // Decoded frames -> writer, until the decoder exits.
         let reader = s.spawn(move || {
@@ -682,10 +703,10 @@ fn session(cfg: &Config, procs: &Procs, feed: &Feed) -> Result<Outcome, String> 
         });
         // Phone -> decoder.
         let mut pump = || -> io::Result<()> {
-            conn.set_timeout(Duration::from_secs(10))?;
+            ch.get_ref().set_timeout(Duration::from_secs(10))?;
             let mut buf = Vec::new();
             loop {
-                next_frame(&mut conn, &mut buf)?;
+                next_frame(&mut ch, &mut buf)?;
                 stdin.write_all(&buf).map_err(|e| {
                     io::Error::new(e.kind(), format!("decoder (ffmpeg) stopped: {e}"))
                 })?;
@@ -703,6 +724,7 @@ fn session(cfg: &Config, procs: &Procs, feed: &Feed) -> Result<Outcome, String> 
         };
         (msg, reader.join().unwrap_or(0))
     });
+    live.camera(false);
     Ok(Outcome {
         streamed: true,
         msg: if frames == 0 {
@@ -716,7 +738,7 @@ fn session(cfg: &Config, procs: &Procs, feed: &Feed) -> Result<Outcome, String> 
 /// The camera: a writer that keeps the webcam fed for the whole run, and a
 /// reconnect loop for the phone's stream, independent of the audio one.
 /// Returns after one attempt with `once`; `Err` only for fatal problems.
-pub fn run(cfg: &Config, procs: &Procs) -> Result<(), String> {
+pub fn run(cfg: &Config, procs: &Procs, live: &Live) -> Result<(), String> {
     let placeholder = placeholder(cfg.size);
     let stdin = procs
         .spawn_writer(cfg)
@@ -736,7 +758,7 @@ pub fn run(cfg: &Config, procs: &Procs) -> Result<(), String> {
             // at first.
             let mut fails = 0;
             loop {
-                let o = session(cfg, procs, &feed)?;
+                let o = session(cfg, procs, &feed, live)?;
                 if o.streamed {
                     log!("camera: stopped: {}", o.msg);
                     last.clear();

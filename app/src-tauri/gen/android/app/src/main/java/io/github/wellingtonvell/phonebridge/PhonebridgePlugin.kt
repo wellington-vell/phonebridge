@@ -3,6 +3,7 @@ package io.github.wellingtonvell.phonebridge
 import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -45,6 +46,10 @@ class CameraArgs {
     var height: Int = 720
     var fps: Int = 30
     var orientation: String = "landscape"
+    /** Pairing code, display form (from getToken). */
+    var token: String = ""
+    /** Also accept clients without the pairing code (plaintext PBV1). */
+    var allowUnauthenticated: Boolean = false
 }
 
 @InvokeArg
@@ -186,6 +191,8 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
             height = args.height,
             fps = args.fps,
             portrait = args.orientation == "portrait",
+            token = SecureChannel.canonicalCode(args.token),
+            allowUnauthenticated = args.allowUnauthenticated,
         )
         try {
             var streamer: CameraStreamer? = null
@@ -221,6 +228,28 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
             activity.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED,
         )
         invoke.resolve(ret)
+    }
+
+    private val prefs get() = activity.getSharedPreferences("phonebridge", Context.MODE_PRIVATE)
+
+    private fun resolveToken(invoke: Invoke, code: String) {
+        invoke.resolve(JSObject().apply { put("token", SecureChannel.displayCode(code)) })
+    }
+
+    private fun storeNewToken(): String =
+        SecureChannel.newCode().also { prefs.edit().putString("token", it).commit() }
+
+    /** The pairing code (docs/secure-channel.md), created on first use. */
+    @Command
+    fun getToken(invoke: Invoke) {
+        val stored = prefs.getString("token", null)
+        resolveToken(invoke, stored?.takeIf { SecureChannel.isValidCode(it) } ?: storeNewToken())
+    }
+
+    /** A new pairing code; PCs paired with the old one must re-pair. */
+    @Command
+    fun resetToken(invoke: Invoke) {
+        resolveToken(invoke, storeNewToken())
     }
 
     /** Where the page's preview placeholder is, in window pixels. */

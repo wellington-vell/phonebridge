@@ -15,6 +15,11 @@
 //!
 //! Every transport ends up here as TCP: USB through `adb forward`, Wi-Fi
 //! directly, Bluetooth through the RFCOMM bridge in the Android plugin.
+//!
+//! All of this runs inside the PBA1 secure channel (secure.rs): a client
+//! must prove it knows the pairing code before anything else, then every
+//! byte (and every UDP datagram) is encrypted. Plaintext clients (the
+//! official WO Mic app) are only accepted when the user allowed them.
 
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
@@ -27,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capture::{Capture, Source};
 use crate::encoder::{Encoder, FRAME};
+use crate::secure::{self, Key, RecordReader, RecordWriter, STEP_TIMEOUT, UdpSealer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -113,6 +119,98 @@ const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(4);
 /// Called with true when a client starts streaming and false when it stops.
 pub type OnConnected = Arc<dyn Fn(bool) + Send + Sync>;
 
+/// Who may connect.
+pub struct Auth {
+    /// Pairing code, canonical form (see secure.rs).
+    pub code: String,
+    /// Also accept plaintext clients without the code (official WO Mic
+    /// client). Off by default: anyone who can reach the port could listen.
+    pub allow_unauthenticated: bool,
+}
+
+/// Connections doing their handshake at once; more are closed right away,
+/// so a connection flood can't exhaust threads.
+const MAX_PENDING: usize = 4;
+/// A handshake (PBA1 and the WO Mic hello) that takes longer is cut off, so
+/// slow clients can't hold the pending slots.
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Reading side of a client connection.
+enum Reader {
+    /// Plaintext, starting with the 4 bytes read to tell it from PBA1.
+    Plain(io::Chain<io::Cursor<[u8; 4]>, TcpStream>),
+    Secure(Box<RecordReader<TcpStream>>),
+}
+
+impl Read for Reader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Reader::Plain(r) => r.read(buf),
+            Reader::Secure(r) => r.read(buf),
+        }
+    }
+}
+
+/// Writing side of a client connection.
+enum Writer {
+    Plain(TcpStream),
+    Secure(Box<RecordWriter<TcpStream>>),
+}
+
+impl Write for Writer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Writer::Plain(w) => w.write(buf),
+            Writer::Secure(w) => w.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Writer::Plain(w) => w.flush(),
+            Writer::Secure(w) => w.flush(),
+        }
+    }
+}
+
+/// Both sides as one stream, for the handshake.
+struct Duplex<'a, R, W>(&'a mut R, &'a mut W);
+
+impl<R: Read, W> Read for Duplex<'_, R, W> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl<R, W: Write> Write for Duplex<'_, R, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.1.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.1.flush()
+    }
+}
+
+/// A client that completed its handshake, ready to stream.
+struct Ready {
+    sock: TcpStream,
+    reader: Reader,
+    writer: Writer,
+    peer: String,
+    /// UDP media port the client asked for (0: inline media).
+    udp_port: u16,
+    /// UDP media key, for an authenticated client.
+    udp_key: Option<Key>,
+}
+
+/// A connection doing its handshake on its own thread.
+struct Pending {
+    sock: TcpStream,
+    started: Instant,
+    thread: thread::JoinHandle<Option<Ready>>,
+}
+
 /// A client being served on its own thread.
 struct Active {
     sock: TcpStream,
@@ -128,10 +226,18 @@ impl Active {
     }
 }
 
-/// Listen until `shared.stop` is set. One client streams at a time; a new
+/// Listen until `shared.stop` is set. One client streams at a time. A new
 /// connection replaces the current one, so a PC that vanished without
-/// closing its connection can't block it from reconnecting.
-pub fn serve(transport: Transport, port: u16, shared: Arc<Shared>, on_connected: OnConnected) {
+/// closing its connection can't block it from reconnecting, but only once it
+/// completed its handshake (with the pairing code unless `auth` allows
+/// clients without it): anything else can't cut off the current client.
+pub fn serve(
+    transport: Transport,
+    port: u16,
+    auth: Auth,
+    shared: Arc<Shared>,
+    on_connected: OnConnected,
+) {
     // USB arrives through adb forward and Bluetooth through the local bridge,
     // so only Wi-Fi needs to be reachable from the network.
     let ip = match transport {
@@ -151,27 +257,27 @@ pub fn serve(transport: Transport, port: u16, shared: Arc<Shared>, on_connected:
     };
     shared.update(|s| s.state = State::Listening);
 
+    let auth = Arc::new(auth);
     let mut active: Option<Active> = None;
+    let mut pending: Vec<Pending> = Vec::new();
     while !shared.stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((sock, addr)) => {
-                if let Some(old) = active.take() {
-                    old.end();
-                }
                 let peer = match transport {
                     Transport::Bluetooth => "Bluetooth".to_string(),
                     Transport::Usb => "USB".to_string(),
                     Transport::Wifi => addr.ip().to_string(),
                 };
-                match start_session(sock, peer, &shared, &on_connected) {
-                    Ok(a) => active = Some(a),
-                    Err(e) => shared.fail(e),
+                if pending.len() >= MAX_PENDING {
+                    eprintln!("[phonebridge] {peer}: too many pending connections, closed");
+                } else {
+                    match start_pending(sock, peer, &auth, &shared) {
+                        Ok(p) => pending.push(p),
+                        Err(e) => shared.fail(e),
+                    }
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if active.as_ref().is_some_and(|a| a.thread.is_finished()) {
-                    active.take().unwrap().end();
-                }
                 thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
@@ -179,6 +285,35 @@ pub fn serve(transport: Transport, port: u16, shared: Arc<Shared>, on_connected:
                 thread::sleep(Duration::from_secs(1));
             }
         }
+
+        // A client that completed its handshake takes over from the current one.
+        let mut i = 0;
+        while i < pending.len() {
+            if !pending[i].thread.is_finished() {
+                if pending[i].started.elapsed() > HANDSHAKE_DEADLINE {
+                    let _ = pending[i].sock.shutdown(Shutdown::Both);
+                }
+                i += 1;
+                continue;
+            }
+            let Ok(Some(ready)) = pending.swap_remove(i).thread.join() else {
+                continue;
+            };
+            if let Some(old) = active.take() {
+                old.end();
+            }
+            match start_session(ready, &shared, &on_connected) {
+                Ok(a) => active = Some(a),
+                Err(e) => shared.fail(e),
+            }
+        }
+        if active.as_ref().is_some_and(|a| a.thread.is_finished()) {
+            active.take().unwrap().end();
+        }
+    }
+    for p in pending {
+        let _ = p.sock.shutdown(Shutdown::Both);
+        let _ = p.thread.join();
     }
     if let Some(a) = active.take() {
         a.end();
@@ -189,13 +324,88 @@ pub fn serve(transport: Transport, port: u16, shared: Arc<Shared>, on_connected:
     });
 }
 
-fn start_session(
+fn start_pending(
     sock: TcpStream,
     peer: String,
+    auth: &Arc<Auth>,
+    shared: &Arc<Shared>,
+) -> Result<Pending, String> {
+    let handle = sock.try_clone().map_err(|e| e.to_string())?;
+    let (auth, shared) = (Arc::clone(auth), Arc::clone(shared));
+    let thread = thread::Builder::new()
+        .name("phonebridge-handshake".into())
+        .spawn(move || match establish(sock, &peer, &auth) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                // Refused clients are shown; anything else (port scans,
+                // timeouts) is only logged, to not bury the current session.
+                if matches!(e.kind(), io::ErrorKind::PermissionDenied) {
+                    shared.fail(format!("{peer}: {e}"));
+                } else {
+                    eprintln!("[phonebridge] {peer}: handshake: {e}");
+                }
+                None
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(Pending {
+        sock: handle,
+        started: Instant::now(),
+        thread,
+    })
+}
+
+/// PBA1 (or plaintext if allowed) and the WO Mic handshake, each step
+/// within [`STEP_TIMEOUT`].
+fn establish(mut sock: TcpStream, peer: &str, auth: &Auth) -> io::Result<Ready> {
+    sock.set_nonblocking(false)?;
+    sock.set_nodelay(true)?;
+    sock.set_read_timeout(Some(STEP_TIMEOUT))?;
+    sock.set_write_timeout(Some(STEP_TIMEOUT))?;
+    let mut magic = [0u8; 4];
+    sock.read_exact(&mut magic)?;
+    let (mut reader, mut writer, udp_key) = if &magic == secure::MAGIC {
+        let keys = secure::accept(&mut sock, &auth.code)?;
+        (
+            Reader::Secure(Box::new(RecordReader::new(
+                sock.try_clone()?,
+                &keys.key_c2s,
+            ))),
+            Writer::Secure(Box::new(RecordWriter::new(
+                sock.try_clone()?,
+                &keys.key_s2c,
+            ))),
+            Some(keys.key_udp),
+        )
+    } else if auth.allow_unauthenticated {
+        (
+            Reader::Plain(io::Cursor::new(magic).chain(sock.try_clone()?)),
+            Writer::Plain(sock.try_clone()?),
+            None,
+        )
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refused a client without the pairing code",
+        ));
+    };
+    let udp_port = handshake(&mut Duplex(&mut reader, &mut writer))?;
+    Ok(Ready {
+        sock,
+        reader,
+        writer,
+        peer: peer.to_string(),
+        udp_port,
+        udp_key,
+    })
+}
+
+fn start_session(
+    ready: Ready,
     shared: &Arc<Shared>,
     on_connected: &OnConnected,
 ) -> Result<Active, String> {
-    let handle = sock.try_clone().map_err(|e| e.to_string())?;
+    let handle = ready.sock.try_clone().map_err(|e| e.to_string())?;
     let cancel = Arc::new(AtomicBool::new(false));
     let thread = {
         let (shared, on_connected, cancel) = (
@@ -206,7 +416,7 @@ fn start_session(
         thread::Builder::new()
             .name("phonebridge-session".into())
             .spawn(move || {
-                if let Err(e) = session(sock, &peer, &shared, &*on_connected, &cancel)
+                if let Err(e) = session(ready, &shared, &*on_connected, &cancel)
                     && !cancel.load(Ordering::Relaxed)
                 {
                     shared.fail(e);
@@ -275,60 +485,86 @@ fn handshake(sock: &mut (impl Read + Write)) -> io::Result<u16> {
     }
 }
 
+/// UDP media socket, encrypting for an authenticated client.
+struct Udp {
+    sock: UdpSocket,
+    sealer: Option<UdpSealer>,
+    buf: Vec<u8>,
+}
+
+impl Udp {
+    /// A refused or failed datagram is not fatal; the control stream decides.
+    fn send(&mut self, frame: &[u8]) {
+        let datagram = match &mut self.sealer {
+            Some(s) => match s.seal(frame, &mut self.buf) {
+                Ok(()) => &self.buf,
+                Err(_) => return,
+            },
+            None => frame,
+        };
+        let _ = self.sock.send(datagram);
+    }
+}
+
 fn session(
-    mut sock: TcpStream,
-    peer: &str,
+    ready: Ready,
     shared: &Shared,
     on_connected: &(dyn Fn(bool) + Send + Sync),
     cancel: &AtomicBool,
 ) -> Result<(), String> {
+    let Ready {
+        sock,
+        mut reader,
+        mut writer,
+        peer,
+        udp_port,
+        udp_key,
+    } = ready;
     let io_err = |e: io::Error| format!("{peer}: {e}");
-    sock.set_nonblocking(false).map_err(io_err)?;
-    sock.set_nodelay(true).map_err(io_err)?;
-    sock.set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(io_err)?;
-    let udp_port = handshake(&mut sock).map_err(io_err)?;
     // A PC that stops reading must not block the stream forever.
     sock.set_write_timeout(Some(Duration::from_secs(2)))
         .map_err(io_err)?;
-    let udp = match udp_port {
+    let mut udp = match udp_port {
         0 => None,
         port => {
             let ip = sock.peer_addr().map_err(io_err)?.ip();
             let u = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(io_err)?;
             u.connect((ip, port)).map_err(io_err)?;
-            Some(u)
+            Some(Udp {
+                sock: u,
+                sealer: udp_key.as_ref().map(UdpSealer::new),
+                buf: Vec::with_capacity(1500),
+            })
         }
     };
 
     // After start the client only sends keepalives (if it supports them).
     // EOF, an error or missing keepalives mean it went away; needed with UDP
-    // media, where sends don't fail.
+    // media, where sends don't fail. The watcher is the only reader from
+    // here on, the stream below the only writer.
     let closed = Arc::new(AtomicBool::new(false));
-    let mut watch = sock.try_clone().map_err(io_err)?;
-    watch
-        .set_read_timeout(Some(Duration::from_secs(1)))
+    sock.set_read_timeout(Some(Duration::from_secs(1)))
         .map_err(io_err)?;
     let watch_closed = Arc::clone(&closed);
     thread::spawn(move || {
-        watch_control(&mut watch);
+        watch_control(&mut reader);
         watch_closed.store(true, Ordering::Relaxed);
     });
 
     shared.update(|s| {
         s.state = State::Connected;
-        s.peer = Some(peer.to_string());
+        s.peer = Some(peer.clone());
         s.error = None;
     });
     on_connected(true);
-    let result = stream(&mut sock, udp.as_ref(), shared, &closed, cancel);
+    let result = stream(&mut writer, udp.as_mut(), shared, &closed, cancel);
     on_connected(false);
     let _ = sock.shutdown(Shutdown::Both);
     result
 }
 
 /// Return when the client is gone: EOF, error or keepalive timeout.
-fn watch_control(sock: &mut TcpStream) {
+fn watch_control(sock: &mut impl Read) {
     let mut last_keepalive: Option<Instant> = None;
     let mut pending = Vec::new();
     let mut buf = [0u8; 256];
@@ -364,8 +600,8 @@ fn watch_control(sock: &mut TcpStream) {
 }
 
 fn stream(
-    sock: &mut TcpStream,
-    udp: Option<&UdpSocket>,
+    sock: &mut impl Write,
+    mut udp: Option<&mut Udp>,
     shared: &Shared,
     closed: &AtomicBool,
     cancel: &AtomicBool,
@@ -412,11 +648,8 @@ fn stream(
         packet.extend_from_slice(&timestamp.to_be_bytes());
         packet.push(0);
         packet.extend_from_slice(opus);
-        match udp {
-            // A refused datagram is not fatal; the control stream decides.
-            Some(u) => {
-                let _ = u.send(&packet);
-            }
+        match udp.as_mut() {
+            Some(u) => u.send(&packet),
             None => {
                 if sock.write_all(&packet).is_err() {
                     return Ok(()); // client went away
@@ -441,20 +674,6 @@ mod tests {
         input.extend_from_slice(&[0x67, 0, 0, 0, 0]);
         let mut rw = io::Cursor::new(input);
         let mut out = Vec::new();
-        struct Duplex<'a>(&'a mut io::Cursor<Vec<u8>>, &'a mut Vec<u8>);
-        impl Read for Duplex<'_> {
-            fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
-                self.0.read(b)
-            }
-        }
-        impl Write for Duplex<'_> {
-            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-                self.1.write(b)
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
         let port = handshake(&mut Duplex(&mut rw, &mut out)).unwrap();
         assert_eq!(port, 5000);
         assert_eq!(
@@ -465,5 +684,85 @@ mod tests {
                 0x67, 0, 0, 0, 1, 0
             ]
         );
+    }
+
+    const CODE: &str = "ABCDEFGHJKMNPQRSTVWX";
+
+    fn hello() -> Vec<u8> {
+        let mut m = vec![0x65, 0, 0, 0, 6, 4, 6, 3, 0, 0, 0];
+        m.extend_from_slice(&[0x66, 0, 0, 0, 6, 2, 2, 0, 0, 0, 0]);
+        m.extend_from_slice(&[0x67, 0, 0, 0, 0]);
+        m
+    }
+
+    /// `establish` on a server socket while `client` talks to it.
+    fn with_client<T: Send + 'static>(
+        allow_unauthenticated: bool,
+        client: impl FnOnce(TcpStream) -> T + Send + 'static,
+    ) -> (io::Result<Ready>, T) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = thread::spawn(move || client(TcpStream::connect(addr).unwrap()));
+        let (sock, _) = listener.accept().unwrap();
+        let auth = Auth {
+            code: CODE.into(),
+            allow_unauthenticated,
+        };
+        let ready = establish(sock, "test", &auth);
+        (ready, client.join().unwrap())
+    }
+
+    #[test]
+    fn plaintext_needs_opt_in() {
+        let (ready, _) = with_client(false, |mut c| {
+            let _ = c.write_all(&hello());
+        });
+        assert_eq!(ready.err().unwrap().kind(), io::ErrorKind::PermissionDenied);
+
+        let (ready, reply) = with_client(true, |mut c| {
+            c.write_all(&hello()).unwrap();
+            let mut reply = [0u8; 23];
+            c.read_exact(&mut reply).unwrap();
+            reply
+        });
+        let ready = ready.unwrap();
+        assert!(ready.udp_key.is_none());
+        assert_eq!(reply[..5], [0x65, 0, 0, 0, 6]);
+    }
+
+    #[test]
+    fn secure_session() {
+        let (ready, (keys, reply, keepalive)) = with_client(false, |mut c| {
+            let nc = [1u8; 16];
+            let mut m = secure::MAGIC.to_vec();
+            m.extend_from_slice(&nc);
+            c.write_all(&m).unwrap();
+            let mut ns = [0u8; 16];
+            c.read_exact(&mut ns).unwrap();
+            let keys = secure::derive(CODE, &nc, &ns);
+            c.write_all(&keys.auth_c2s).unwrap();
+            let mut proof = [0u8; 32];
+            c.read_exact(&mut proof).unwrap();
+            assert_eq!(proof, keys.auth_s2c);
+            let mut w = RecordWriter::new(c.try_clone().unwrap(), &keys.key_c2s);
+            // Records need not line up with messages.
+            let msgs = hello();
+            w.write_all(&msgs[..3]).unwrap();
+            w.write_all(&msgs[3..]).unwrap();
+            let mut r = RecordReader::new(c, &keys.key_s2c);
+            let mut reply = [0u8; 23];
+            r.read_exact(&mut reply).unwrap();
+            w.write_all(&[KEEPALIVE, 0, 0, 0, 0]).unwrap();
+            (keys, reply, w)
+        });
+        let mut ready = ready.unwrap();
+        assert_eq!(ready.udp_key, Some(keys.key_udp));
+        assert_eq!(
+            reply[..11],
+            [0x65, 0, 0, 0, 6, 0, 4, b'w', b'm', b'k', b'a']
+        );
+        let (mtype, _) = read_msg(&mut ready.reader).unwrap();
+        assert_eq!(mtype, KEEPALIVE);
+        drop(keepalive);
     }
 }

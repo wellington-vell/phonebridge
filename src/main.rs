@@ -22,7 +22,7 @@
 
 use std::fs;
 use std::io;
-use std::net::UdpSocket;
+use std::net::{Ipv4Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,10 +38,14 @@ mod control;
 mod opus;
 mod output;
 mod proto;
+mod secure;
 mod transport;
 mod video;
 
-use transport::{Media, Transport};
+use transport::{Conn, Media, Transport};
+
+/// The audio connection, encrypted with a pairing code.
+type Link = secure::Channel<Conn, Conn>;
 
 macro_rules! log {
     ($($arg:tt)*) => { eprintln!("[phonebridge] {}", format_args!($($arg)*)) };
@@ -55,6 +59,7 @@ usage: phonebridge [OPTIONS]                 run the client in the foreground
        phonebridge stop
        phonebridge mute                     toggle mute (the input stays, sending silence)
        phonebridge status                   print connected | muted | connecting | off
+       phonebridge logfile                  print the background log file (also camera logfile)
        phonebridge camera toggle|start|stop [OPTIONS]
                                             the same for the webcam alone, as a separate
                                             instance (--camera --no-mic)
@@ -64,6 +69,11 @@ usage: phonebridge [OPTIONS]                 run the client in the foreground
 Use your Android phone as a microphone and webcam (USB via adb, Wi-Fi or Bluetooth)
 
 options:
+  --token CODE       pairing code shown in the phone app (ABCDE-FGHJK-MNPQR-STVWX):
+                     authenticates the phone and encrypts audio and video. Also read
+                     from $PHONEBRIDGE_TOKEN or $XDG_CONFIG_HOME/phonebridge/token
+                     (chmod 600). Without a code the link is plaintext and anyone
+                     can connect (only for the official WO Mic app)
   --port PORT        control port (default 8125)
   --wifi HOST        connect over Wi-Fi to the phone's address instead of USB
   --udp PORT         Wi-Fi: receive media on this UDP port (default: inline TCP)
@@ -90,6 +100,8 @@ webcam (USB or Wi-Fi; needs ffmpeg and the v4l2loopback kernel module):
                      so browsers always list the webcam";
 
 struct Args {
+    /// Canonical pairing code from --token.
+    token: Option<String>,
     port: u16,
     transport: Transport,
     udp: u16,
@@ -110,8 +122,25 @@ impl Args {
     }
 }
 
+/// The name goes into PipeWire property strings: keep out what would end the
+/// string or start another property.
+fn check_name(name: String) -> Result<String, String> {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|c| c.is_control() || "\"\\{}[]=".contains(c))
+    {
+        return Err(format!(
+            "invalid --name {name:?}: must not be empty or contain \" \\ {{ }} [ ] = \
+             or control characters"
+        ));
+    }
+    Ok(name)
+}
+
 fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
+        token: None,
         port: 8125,
         transport: Transport::Usb { adb: true },
         udp: 0,
@@ -166,7 +195,8 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
                     _ => return Err("--bt-channel needs --bluetooth ADDR first".into()),
                 }
             }
-            "--name" => a.name = value()?,
+            "--token" => a.token = Some(secure::normalize(&value()?)?),
+            "--name" => a.name = check_name(value()?)?,
             "--stdout" => a.stdout = true,
             "--no-adb" => a.no_adb = true,
             "--once" => a.once = true,
@@ -215,7 +245,7 @@ fn parse_args(argv: impl Iterator<Item = String>) -> Result<Args, String> {
 // --------------------------------------------------------------------------- mute
 /// SIGUSR1 toggles mute. While muted, silence is sent so the source stays alive.
 ///
-/// State is mirrored to $XDG_RUNTIME_DIR/phonebridge/muted for status queries.
+/// State is mirrored to `muted` in the state directory for status queries.
 /// A camera-only client has no microphone and leaves the flag alone (a
 /// separate microphone instance owns it).
 struct Mute {
@@ -224,10 +254,10 @@ struct Mute {
 }
 
 impl Mute {
-    fn new(mic: bool) -> Self {
+    fn new(mic: bool, dir: Option<&Path>) -> Self {
         let m = Mute {
             on: AtomicBool::new(false),
-            flag: mic.then(|| control::state_dir().join("muted")),
+            flag: dir.filter(|_| mic).map(|d| d.join("muted")),
         };
         m.set(false);
         m
@@ -241,8 +271,7 @@ impl Mute {
         let Some(flag) = &self.flag else { return };
         self.on.store(on, Ordering::Relaxed);
         let _ = if on {
-            flag.parent().map(fs::create_dir_all);
-            fs::write(flag, b"")
+            control::write_file(flag, b"")
         } else {
             fs::remove_file(flag).or_else(|e| match e.kind() {
                 io::ErrorKind::NotFound => Ok(()),
@@ -267,6 +296,8 @@ impl Mute {
 /// Whichever thread starts it owns the exit; the other one just parks.
 struct Cleanup {
     mute: Mute,
+    /// Connection state for `status`.
+    live: control::Live,
     children: Mutex<Vec<Child>>,
     /// The camera's ffmpeg processes (webcam writer, per-connection decoder).
     video: video::Procs,
@@ -283,6 +314,7 @@ impl Cleanup {
         if self.mute.is_on() {
             self.mute.toggle();
         }
+        self.live.clear();
         self.video.stop_all();
         let children = std::mem::take(&mut *self.children.lock().unwrap());
         children.into_iter().for_each(video::stop_child);
@@ -310,36 +342,48 @@ fn stream(
     dec: &mut opus::Decoder,
     out: &mut output::Output,
     mute: &Mute,
+    live: &control::Live,
 ) -> Result<(bool, io::Error), String> {
-    let connect = || -> io::Result<(transport::Conn, Media, bool)> {
-        let mut conn = transport::connect(&args.transport, args.port)?;
+    let connect = || -> io::Result<(Link, Media, bool)> {
+        let conn = transport::connect(&args.transport, args.port)?;
         conn.set_timeout(Duration::from_secs(5))?;
-        let media = if args.udp != 0 {
-            let sock = UdpSocket::bind(("0.0.0.0", args.udp))?;
+        // Only on the interface that reaches the phone.
+        let udp = if args.udp != 0 {
+            let ip = conn.local_ip().unwrap_or(Ipv4Addr::UNSPECIFIED.into());
+            let sock = UdpSocket::bind((ip, args.udp))?;
             sock.set_read_timeout(Some(Duration::from_secs(10)))?;
-            Media::Udp(sock, conn.peer_ip())
+            Some(sock)
         } else {
-            Media::Inline
+            None
         };
-        let session = proto::handshake(&mut conn, args.udp)?;
-        conn.set_timeout(Duration::from_secs(10))?;
-        Ok((conn, media, session.keepalive))
+        let peer = conn.peer_ip();
+        let (mut link, key) = secure::open(conn.try_clone()?, conn, args.token.as_deref())?;
+        let media = match udp {
+            Some(sock) => Media::Udp(sock, peer, key),
+            None => Media::Inline,
+        };
+        let session = proto::handshake(&mut link, args.udp)?;
+        link.get_ref().set_timeout(Duration::from_secs(10))?;
+        Ok((link, media, session.keepalive))
     };
-    let (mut conn, mut media, keepalive) = match connect() {
+    let (mut link, mut media, keepalive) = match connect() {
         Ok(c) => c,
         Err(e) => return Ok((false, e)),
     };
+    live.audio(true);
 
     // Keepalives until this function returns (the flag drops with it).
     let alive = Arc::new(AtomicBool::new(true));
-    struct Done(Arc<AtomicBool>);
-    impl Drop for Done {
+    struct Done<'a>(Arc<AtomicBool>, &'a control::Live);
+    impl Drop for Done<'_> {
         fn drop(&mut self) {
             self.0.store(false, Ordering::Relaxed);
+            self.1.audio(false);
         }
     }
-    let _done = Done(Arc::clone(&alive));
-    if keepalive && let Ok(mut ka) = conn.try_clone() {
+    let _done = Done(Arc::clone(&alive), live);
+    if keepalive {
+        let mut ka = link.writer();
         thread::spawn(move || {
             while alive.load(Ordering::Relaxed) && proto::keepalive(&mut ka).is_ok() {
                 thread::sleep(Duration::from_secs(1));
@@ -361,7 +405,7 @@ fn stream(
 
     let mut last_seq: Option<u16> = None;
     loop {
-        let frame = match media.next(&mut conn) {
+        let frame = match media.next(&mut link) {
             Ok(f) => f,
             Err(e) => return Ok((true, e)),
         };
@@ -387,7 +431,14 @@ fn stream(
 }
 
 // --------------------------------------------------------------------------- main
-fn run(args: Args) -> Result<ExitCode, String> {
+fn run(mut args: Args) -> Result<ExitCode, String> {
+    args.token = control::token(args.token.take())?;
+    if args.token.is_none() {
+        log!(
+            "no pairing code (--token): the link is unauthenticated and unencrypted \
+             (only for the official WO Mic app)"
+        );
+    }
     let mut dec = opus::Decoder::new()?;
     let video = if args.camera {
         Some(video::Config {
@@ -399,6 +450,7 @@ fn run(args: Args) -> Result<ExitCode, String> {
             },
             once: args.once,
             size: args.video_size.unwrap_or(video::DEFAULT_SIZE),
+            token: args.token.clone(),
         })
     } else {
         None
@@ -423,8 +475,19 @@ fn run(args: Args) -> Result<ExitCode, String> {
             Ok(_) => {}
         }
     }
+    // Status files are a convenience in the foreground; without a safe
+    // directory the client still runs.
+    let dir = control::state_dir()
+        .inspect_err(|e| log!("no state directory, status unavailable: {e}"))
+        .ok();
+    let kind = if args.mic {
+        control::Kind::Mic
+    } else {
+        control::Kind::Camera
+    };
     let cleanup = Arc::new(Cleanup {
-        mute: Mute::new(args.mic),
+        mute: Mute::new(args.mic, dir.as_deref()),
+        live: control::Live::new(kind, dir.as_deref()),
         children: Mutex::new(Vec::new()),
         video: video::Procs::default(),
         adb_ports: if args.no_adb { Vec::new() } else { ports },
@@ -447,8 +510,9 @@ fn run(args: Args) -> Result<ExitCode, String> {
 
     // The camera has its own reconnect loop; when it ends for good (--once or
     // a fatal error) the whole client exits, as it does for audio.
-    let video_loop =
-        |cfg: video::Config, c: &Cleanup| video::run(&cfg, &c.video).map(|()| ExitCode::FAILURE);
+    let video_loop = |cfg: video::Config, c: &Cleanup| {
+        video::run(&cfg, &c.video, &c.live).map(|()| ExitCode::FAILURE)
+    };
     let video = match video {
         Some(cfg) if args.mic => {
             let c = Arc::clone(&cleanup);
@@ -478,7 +542,7 @@ fn run(args: Args) -> Result<ExitCode, String> {
         // Failed attempts are logged when the reason changes, not every 2s.
         let mut last = String::new();
         loop {
-            let (streamed, e) = stream(&args, &mut dec, &mut out, &cleanup.mute)?;
+            let (streamed, e) = stream(&args, &mut dec, &mut out, &cleanup.mute, &cleanup.live)?;
             let msg = e.to_string();
             if streamed || msg != last {
                 if streamed {
@@ -528,4 +592,31 @@ fn main() -> ExitCode {
         eprintln!("{e}");
         ExitCode::FAILURE
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, String> {
+        parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn token_is_normalized() {
+        let a = parse(&["--token", "abcde-fghjk-mnpqr-stvwo"]).unwrap();
+        assert_eq!(a.token.as_deref(), Some("ABCDEFGHJKMNPQRSTVW0"));
+        assert!(parse(&["--token=ABC"]).is_err());
+    }
+
+    #[test]
+    fn names_cannot_inject_properties() {
+        assert_eq!(
+            parse(&["--name", "Phone Mic 2"]).unwrap().name,
+            "Phone Mic 2"
+        );
+        for bad in ["x\" node.name=foo", "a=b", "[x]", "{x}", "a\\b", "a\nb", ""] {
+            assert!(parse(&["--name", bad]).is_err(), "{bad:?}");
+        }
+    }
 }

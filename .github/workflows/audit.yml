@@ -1,0 +1,27 @@
+# Known vulnerabilities in the Rust dependencies of the client and the app.
+name: audit
+
+on:
+  push:
+    paths: ["**/Cargo.toml", "**/Cargo.lock", ".github/workflows/audit.yml"]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lockfile: [Cargo.lock, app/src-tauri/Cargo.lock]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit --file ${{ matrix.lockfile }}

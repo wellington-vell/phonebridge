@@ -14,6 +14,10 @@ const els = {
   source: $("source"),
   keepScreen: $("keep-screen"),
   hint: $("hint"),
+  token: $("token"),
+  newCode: $("new-code"),
+  allowUnauth: $("allow-unauth"),
+  insecureNote: $("insecure-note"),
   camera: $("camera"),
   cameraState: $("camera-state"),
   cameraNote: $("camera-note"),
@@ -37,6 +41,8 @@ const DEFAULTS = {
   keepScreenOn: true,
   gain: 100,
   muted: false,
+  // Plaintext clients without the pairing code (official WO Mic client).
+  allowUnauthenticated: false,
   camera: false,
   lens: "back",
   resolution: 720,
@@ -72,6 +78,8 @@ function save() {
 // ------------------------------------------------------------------ rendering
 let running = false;
 let addresses = [];
+// Pairing code, display form ("ABCDE-FGHJK-MNPQR-STVWX"); "" until loaded.
+let token = "";
 
 function renderMute() {
   els.mute.setAttribute("aria-pressed", String(settings.muted));
@@ -98,28 +106,60 @@ function cameraConfig() {
   };
 }
 
+/** An element with text content; never parses HTML. */
+function el(tag, ...children) {
+  const node = document.createElement(tag);
+  node.append(...children);
+  return node;
+}
+
 function renderHint() {
   const port = settings.port;
   const portArg = (port === 8125 ? "" : ` --port ${port}`) + (cameraOn() ? " --camera" : "");
-  let html;
+  const code = token || "PAIRING-CODE";
+  const file = "~/.config/phonebridge/token";
+  const nodes = [
+    el("p", "Save the pairing code on the PC once:"),
+    el("code", `echo ${code} | install -Dm600 /dev/stdin ${file}`),
+  ];
   switch (settings.transport) {
     case "usb":
-      html = `<p>Enable USB debugging, plug the phone in and run on the PC:</p>
-        <code>phonebridge${portArg}</code>`;
+      nodes.push(
+        el("p", "Enable USB debugging, plug the phone in and run on the PC:"),
+        el("code", `phonebridge${portArg}`),
+      );
       break;
     case "wifi": {
       const ips = addresses.length ? addresses.map((a) => a.ip) : ["PHONE_IP"];
-      html = `<p>Same network as the PC. Run on the PC:</p>
-        ${ips.map((ip) => `<code>phonebridge --wifi ${ip}${portArg}</code>`).join("")}`;
+      nodes.push(
+        el("p", "Same network as the PC. Run on the PC:"),
+        ...ips.map((ip) => el("code", `phonebridge --wifi ${ip}${portArg}`)),
+      );
       break;
     }
     case "bluetooth":
-      html = `<p>Pair the phone with the PC first, then run (phone address from
-        <em>bluetoothctl devices</em>):</p>
-        <code>phonebridge --bluetooth AA:BB:CC:DD:EE:FF</code>`;
+      nodes.push(
+        el(
+          "p",
+          "Pair the phone with the PC first, then run (phone address from ",
+          el("em", "bluetoothctl devices"),
+          "):",
+        ),
+        el("code", "phonebridge --bluetooth AA:BB:CC:DD:EE:FF"),
+      );
       break;
   }
-  els.hint.innerHTML = html;
+  nodes.push(el("p", "Or pass the code with --token, or in PHONEBRIDGE_TOKEN."));
+  els.hint.replaceChildren(...nodes);
+}
+
+function renderToken() {
+  els.token.textContent = token || "…";
+}
+
+function renderInsecure() {
+  els.allowUnauth.checked = settings.allowUnauthenticated;
+  els.insecureNote.hidden = !settings.allowUnauthenticated;
 }
 
 function renderControls() {
@@ -128,6 +168,10 @@ function renderControls() {
   // Transport and port only apply when (re)starting.
   els.port.disabled = running;
   transportInputs.forEach((i) => (i.disabled = running));
+  els.allowUnauth.disabled = running;
+  // The servers keep the code they started with.
+  els.newCode.disabled = running;
+  els.newCode.title = running ? "Stop to make a new code" : "";
   // Camera settings apply live, but the camera is USB / Wi-Fi only.
   const bluetooth = settings.transport === "bluetooth";
   els.camera.disabled = bluetooth;
@@ -280,6 +324,7 @@ els.toggle.addEventListener("click", async () => {
           keepScreenOn: settings.keepScreenOn,
           gain: settings.gain / 100,
           muted: settings.muted,
+          allowUnauthenticated: settings.allowUnauthenticated,
           camera: cameraConfig(),
         },
       });
@@ -369,6 +414,36 @@ for (const key of ["lens", "resolution", "orientation"]) {
   });
 }
 
+els.allowUnauth.addEventListener("change", () => {
+  settings.allowUnauthenticated = els.allowUnauth.checked;
+  save();
+  renderInsecure();
+});
+
+els.newCode.addEventListener("click", async () => {
+  els.newCode.disabled = true;
+  showError("");
+  try {
+    token = await invoke("reset_token");
+    renderToken();
+    renderHint();
+  } catch (e) {
+    showError(String(e));
+  } finally {
+    els.newCode.disabled = running;
+  }
+});
+
+async function loadToken() {
+  try {
+    token = await invoke("get_token");
+  } catch (e) {
+    showError(String(e));
+  }
+  renderToken();
+  renderHint();
+}
+
 els.cameraSettings.addEventListener("click", () => {
   invoke("open_app_settings").catch((e) => showError(String(e)));
 });
@@ -384,7 +459,10 @@ els.resolution.value = String(settings.resolution);
 els.orientation.value = settings.orientation;
 renderMute();
 renderGain();
+renderInsecure();
+renderToken();
 renderHint();
+loadToken();
 renderControls();
 renderCamera(camera);
 
