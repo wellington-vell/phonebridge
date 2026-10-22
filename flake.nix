@@ -64,6 +64,22 @@
                 boot.extraModprobeConfig = ''
                   options v4l2loopback devices=1 video_nr=${toString cfg.camera.videoNr} card_label="Phonebridge" exclusive_caps=1
                 '';
+                # boot.kernelModules only covers the booted system's module tree, so
+                # after a `nixos-rebuild switch` that adds v4l2loopback it would need
+                # a reboot. Load it from the new system's tree instead.
+                systemd.services.phonebridge-v4l2loopback = {
+                  description = "Load v4l2loopback for the Phonebridge webcam";
+                  wantedBy = [ "multi-user.target" ];
+                  after = [ "systemd-modules-load.service" ];
+                  serviceConfig = {
+                    Type = "oneshot";
+                    RemainAfterExit = true;
+                  };
+                  script = ''
+                    [ -e /sys/module/v4l2loopback ] ||
+                      ${pkgs.kmod}/bin/modprobe -d /run/current-system/kernel-modules v4l2loopback
+                  '';
+                };
               })
             ]
           );
