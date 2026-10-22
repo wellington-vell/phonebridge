@@ -1,53 +1,45 @@
 {
   lib,
-  stdenvNoCC,
+  rustPlatform,
   makeWrapper,
   makeDesktopItem,
   copyDesktopItems,
-  python3,
   android-tools,
   pipewire,
   libopus,
   libnotify,
-  coreutils,
-  procps,
-  gnugrep,
 }:
-stdenvNoCC.mkDerivation {
+rustPlatform.buildRustPackage {
   pname = "wo-mic-linux";
   version = "0.1.0";
 
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
-      ../womic.py
-      ./womic-toggle.sh
+      ../Cargo.toml
+      ../Cargo.lock
+      ../src
       ../assets/womic.png
       ../noctalia
     ];
   };
 
+  cargoLock.lockFile = ../Cargo.lock;
+
   nativeBuildInputs = [
     makeWrapper
     copyDesktopItems
   ];
+  buildInputs = [ libopus ];
 
-  installPhase = ''
-    runHook preInstall
-    install -Dm755 womic.py $out/libexec/womic.py
-    makeWrapper ${python3}/bin/python3 $out/bin/womic \
-      --add-flags $out/libexec/womic.py \
-      --prefix PATH : ${lib.makeBinPath [ android-tools pipewire ]} \
-      --set-default LIBOPUS ${libopus}/lib/libopus.so.0
-    install -Dm755 nix/womic-toggle.sh $out/bin/womic-toggle
-    wrapProgram $out/bin/womic-toggle \
-      --prefix PATH : ${lib.makeBinPath [ libnotify coreutils procps gnugrep ]}:$out/bin \
+  postInstall = ''
+    wrapProgram $out/bin/womic \
+      --prefix PATH : ${lib.makeBinPath [ android-tools pipewire libnotify ]} \
       --set-default WOMIC_ICON $out/share/icons/hicolor/512x512/apps/wo-mic.png
     install -Dm644 assets/womic.png $out/share/icons/hicolor/512x512/apps/wo-mic.png
     # Noctalia bar toggle: point a `path` plugin source at share/noctalia-plugins.
     mkdir -p $out/share/noctalia-plugins
     cp -r noctalia/womic $out/share/noctalia-plugins/womic
-    runHook postInstall
   '';
 
   desktopItems = [
@@ -55,7 +47,7 @@ stdenvNoCC.mkDerivation {
       name = "wo-mic";
       desktopName = "WO Mic";
       comment = "Use your Android phone as a microphone (toggle)";
-      exec = "womic-toggle";
+      exec = "womic toggle";
       icon = "wo-mic";
       categories = [
         "AudioVideo"

@@ -10,9 +10,8 @@ extracted/
 result
 result-*
 
-# Python
-__pycache__/
-*.pyc
+# Rust
+target/
 
 # Local tooling
 .claude/

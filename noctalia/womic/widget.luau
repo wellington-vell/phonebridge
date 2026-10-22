@@ -1,4 +1,4 @@
--- Bar toggle for wo-mic-linux. State comes from `womic-toggle status`.
+-- Bar toggle for wo-mic-linux. State comes from `womic status`.
 --   left click:   start when off, otherwise mute / unmute
 --   right click:  start / stop
 --   middle click: follow the log in a terminal
@@ -19,7 +19,7 @@ local function render()
 end
 
 local function refresh()
-  noctalia.runAsync({ "womic-toggle", "status" }, function(result)
+  noctalia.runAsync({ "womic", "status" }, function(result)
     local s = string.gsub(result.stdout or "", "%s+", "")
     if looks[s] and s ~= state then
       state = s
@@ -34,9 +34,9 @@ local function run(cmd, optimistic)
   render()
   if cmd == "start" then
     -- Detached: start blocks until the handshake finishes.
-    noctalia.runAsync({ "womic-toggle", cmd })
+    noctalia.runAsync({ "womic", cmd })
   else
-    noctalia.runAsync({ "womic-toggle", cmd }, function()
+    noctalia.runAsync({ "womic", cmd }, function()
       refresh()
     end)
   end

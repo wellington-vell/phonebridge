@@ -13,7 +13,7 @@ The protocol was reverse engineered from the official Windows client
 - Linux with PipeWire (`pw-loopback`, `pw-cat`)
 - `adb` (Android platform tools)
 - `libopus`
-- Python 3 (standard library only)
+- Rust toolchain (to build without Nix)
 - WO Mic app on the phone, USB debugging enabled
 
 With Nix all of these are provided for you.
@@ -27,8 +27,8 @@ With Nix all of these are provided for you.
 
    ```sh
    nix run github:wellington-vell/wo-mic-linux
-   # or, without Nix
-   python3 womic.py
+   # or, without Nix (needs libopus development files)
+   cargo run --release
    ```
 
 4. Select **WO Mic** as the input device in your apps (or `wpctl set-default`).
@@ -49,17 +49,24 @@ or the cable is unplugged.
 Quick test, playing the phone straight to your speakers:
 
 ```sh
-python3 womic.py --stdout --once | pw-play --raw --rate 48000 --channels 1 --format s16 -
+womic --stdout --once | pw-play --raw --rate 48000 --channels 1 --format s16 -
 ```
 
-### Launcher toggle
+### Background control
 
-The Nix package also ships `womic-toggle` and a **WO Mic** desktop entry. Opening
-it starts the client in the background (with notifications); opening it again
-stops it. Logs go to `$XDG_RUNTIME_DIR/womic/womic.log`.
-`womic-toggle mute` mutes/unmutes (the input stays available and sends silence;
-also `kill -USR1 <pid>`), and `womic-toggle status` prints `connected`, `muted`,
-`connecting` or `off`.
+`womic` also manages a detached instance of itself, with desktop notifications:
+
+```
+womic toggle            start in the background, or stop it if running
+womic start [OPTIONS]   start in the background (OPTIONS as above)
+womic stop
+womic mute              mute / unmute (the input stays available and sends
+                        silence; also `kill -USR1 <pid>`)
+womic status            print connected | muted | connecting | off
+```
+
+The Nix package ships a **WO Mic** desktop entry that runs `womic toggle`.
+Logs go to `$XDG_RUNTIME_DIR/womic/womic.log`.
 
 ### Noctalia bar toggle
 
