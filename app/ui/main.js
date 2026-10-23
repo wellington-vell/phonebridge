@@ -5,7 +5,6 @@ const els = {
   status: $("status"),
   mute: $("mute"),
   muteLabel: $("mute-label"),
-  level: $("level"),
   gain: $("gain"),
   gainValue: $("gain-value"),
   toggle: $("toggle"),
@@ -30,6 +29,15 @@ const els = {
   lens: $("lens"),
   resolution: $("resolution"),
   orientation: $("orientation"),
+  app: $("app"),
+  lamp: $("tally-lamp"),
+  timecode: $("timecode"),
+  linkReadout: $("link-readout"),
+  linkWarn: $("link-warn"),
+  rec: $("rec"),
+  bezelLens: $("bezel-lens"),
+  bezelRes: $("bezel-res"),
+  gainDb: $("gain-db"),
 };
 const transportInputs = [...document.querySelectorAll('input[name="transport"]')];
 
@@ -88,8 +96,13 @@ function renderMute() {
 }
 
 function renderGain() {
-  els.gain.value = settings.gain;
-  els.gainValue.textContent = `${settings.gain}%`;
+  const g = settings.gain;
+  els.gain.value = g;
+  els.gain.style.setProperty("--fill", `${(g / 400) * 100}%`);
+  els.gainValue.textContent = `${g}%`;
+  const db = g > 0 ? 20 * Math.log10(g / 100) : -Infinity;
+  els.gainDb.textContent =
+    db === -Infinity ? "−∞ dB" : `${db > 0.05 ? "+" : db < -0.05 ? "−" : ""}${Math.abs(db).toFixed(1)} dB`;
 }
 
 // Video is too slow over Bluetooth.
@@ -160,7 +173,10 @@ function renderToken() {
 function renderInsecure() {
   els.allowUnauth.checked = settings.allowUnauthenticated;
   els.insecureNote.hidden = !settings.allowUnauthenticated;
+  els.linkWarn.hidden = !settings.allowUnauthenticated;
 }
+
+const TRANSPORT_LABEL = { usb: "USB", wifi: "Wi‑Fi", bluetooth: "Bluetooth" };
 
 function renderControls() {
   els.toggle.textContent = running ? "Stop" : "Start";
@@ -175,9 +191,13 @@ function renderControls() {
   // Camera settings apply live, but the camera is USB / Wi-Fi only.
   const bluetooth = settings.transport === "bluetooth";
   els.camera.disabled = bluetooth;
+  els.camera.closest(".key").classList.toggle("is-disabled", bluetooth);
   els.flip.disabled = bluetooth;
   [els.lens, els.resolution, els.orientation].forEach((el) => (el.disabled = bluetooth));
   els.cameraNote.hidden = !(bluetooth && settings.camera);
+  els.linkReadout.textContent = bluetooth
+    ? TRANSPORT_LABEL.bluetooth
+    : `${TRANSPORT_LABEL[settings.transport]} · ${settings.port}`;
 }
 
 const CAMERA_LABEL = {
@@ -185,6 +205,14 @@ const CAMERA_LABEL = {
   starting: "Starting…",
   listening: "Waiting for PC",
   streaming: "Streaming",
+  error: "Error",
+};
+
+const REC_LABEL = {
+  off: "Off",
+  starting: "Cue",
+  listening: "Standby",
+  streaming: "Rec",
   error: "Error",
 };
 
@@ -198,6 +226,14 @@ function renderCamera(cam) {
   if (!running && settings.camera && state === "off") label = "On at start";
   els.cameraState.textContent = label;
   els.cameraState.dataset.state = state;
+  // Tally above the monitor: red while the PC takes the picture.
+  const rec = cameraOn() ? REC_LABEL[state] : "Off";
+  els.rec.textContent = rec;
+  els.rec.dataset.state = cameraOn() ? state : "off";
+  els.bezelRes.textContent =
+    state === "streaming" && camera.height
+      ? `${Math.min(camera.width, camera.height)}p`
+      : `${settings.resolution}p`;
 
   // Errors only matter while sharing is wanted.
   const error = cameraOn() && running ? camera.error : "";
@@ -274,6 +310,25 @@ function showError(msg) {
   els.error.textContent = msg || "";
 }
 
+// The tally: off air when stopped, standby while waiting for the PC, on air
+// once the PC takes the microphone or the camera.
+const LAMP_LABEL = { off: "Off air", standby: "Standby", on: "On air" };
+let onAirSince = 0;
+
+function renderTally(air) {
+  els.app.dataset.air = air;
+  els.lamp.textContent = LAMP_LABEL[air];
+  if (air === "on") {
+    if (!onAirSince) onAirSince = Date.now();
+    const t = Math.floor((Date.now() - onAirSince) / 1000);
+    const pad = (n) => String(n).padStart(2, "0");
+    els.timecode.textContent = `${pad(Math.floor(t / 3600))}:${pad(Math.floor(t / 60) % 60)}:${pad(t % 60)}`;
+  } else {
+    onAirSince = 0;
+    els.timecode.textContent = "--:--:--";
+  }
+}
+
 const STATE_LABEL = {
   idle: "Stopped",
   listening: "Waiting for PC",
@@ -294,7 +349,8 @@ async function poll() {
     else if (mic && s.peer) label = `Connected · ${s.peer}`;
     els.status.textContent = label;
     els.status.dataset.state = mic || cam ? "connected" : s.state;
-    els.level.style.width = `${Math.min(100, Math.sqrt(s.level) * 100)}%`;
+    renderTally(mic || cam ? "on" : s.state === "idle" ? "off" : "standby");
+    window.Meter.set(s.level);
     showError(s.error);
     renderCamera(s.camera);
     const ips = JSON.stringify(s.addresses);
@@ -303,6 +359,8 @@ async function poll() {
       renderHint();
     }
     renderControls();
+    // Panels above may change height (errors, notes): keep the native view on #preview.
+    reportPreview();
   } catch (e) {
     showError(String(e));
   }
@@ -367,6 +425,7 @@ els.port.addEventListener("change", () => {
   }
   els.port.value = settings.port;
   renderHint();
+  renderControls();
 });
 
 els.source.addEventListener("change", () => {
@@ -392,6 +451,7 @@ els.camera.addEventListener("change", () => {
 
 function renderLens() {
   els.lens.value = settings.lens;
+  els.bezelLens.textContent = settings.lens === "front" ? "Front" : "Back";
   els.flip.setAttribute(
     "aria-label",
     settings.lens === "front" ? "Switch to the back camera" : "Switch to the front camera",
@@ -410,6 +470,7 @@ for (const key of ["lens", "resolution", "orientation"]) {
     settings[key] = key === "resolution" ? Number(els[key].value) : els[key].value;
     save();
     renderLens();
+    renderCamera(camera);
     if (cameraOn()) applyCamera();
   });
 }
@@ -448,7 +509,36 @@ els.cameraSettings.addEventListener("click", () => {
   invoke("open_app_settings").catch((e) => showError(String(e)));
 });
 
+// ------------------------------------------------------------------ tabs
+const tabs = [...document.querySelectorAll('[role="tab"]')];
+
+function selectTab(tab) {
+  tabs.forEach((t) => {
+    const on = t === tab;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+    $(t.getAttribute("aria-controls")).hidden = !on;
+  });
+  document.querySelector(".panels").scrollTop = 0;
+}
+
+tabs.forEach((tab, i) => {
+  tab.addEventListener("click", () => selectTab(tab));
+  tab.addEventListener("keydown", (e) => {
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    const next = tabs[(i + step + tabs.length) % tabs.length];
+    selectTab(next);
+    next.focus();
+  });
+});
+
+// A link like index.html?tab=link opens on that tab.
+const initialTab = $(`tab-${new URLSearchParams(location.search).get("tab")}`);
+if (initialTab) selectTab(initialTab);
+
 // ------------------------------------------------------------------ init
+window.Meter.init($("vu-bar"), $("vu-db"));
 transportInputs.forEach((i) => (i.checked = i.value === settings.transport));
 els.port.value = settings.port;
 els.source.value = settings.source;
