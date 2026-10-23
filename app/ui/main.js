@@ -2,34 +2,47 @@ const { invoke } = window.__TAURI__.core;
 
 const $ = (id) => document.getElementById(id);
 const els = {
+  app: $("app"),
   status: $("status"),
+  substatus: $("substatus"),
   mute: $("mute"),
   muteLabel: $("mute-label"),
-  level: $("level"),
   gain: $("gain"),
   gainValue: $("gain-value"),
   toggle: $("toggle"),
+  toggleLabel: $("toggle-label"),
   error: $("error"),
   port: $("port"),
   source: $("source"),
   keepScreen: $("keep-screen"),
-  hint: $("hint"),
+  hintPrep: $("hint-prep"),
+  hintSave: $("hint-save"),
+  hintRun: $("hint-run"),
   token: $("token"),
   newCode: $("new-code"),
   allowUnauth: $("allow-unauth"),
   insecureNote: $("insecure-note"),
+  runningNote: $("running-note"),
   camera: $("camera"),
+  cameraToggle: $("camera-toggle"),
+  cameraLabel: $("camera-label"),
   cameraState: $("camera-state"),
   cameraNote: $("camera-note"),
   cameraProblem: $("camera-problem"),
   cameraError: $("camera-error"),
   cameraSettings: $("camera-settings"),
+  previewWrap: $("preview-wrap"),
   preview: $("preview"),
   previewText: $("preview-text"),
   flip: $("flip"),
   lens: $("lens"),
   resolution: $("resolution"),
   orientation: $("orientation"),
+  sheet: $("sheet"),
+  scrim: $("scrim"),
+  openSheet: $("open-sheet"),
+  closeSheet: $("close-sheet"),
+  dockSummary: $("dock-summary"),
 };
 const transportInputs = [...document.querySelectorAll('input[name="transport"]')];
 
@@ -57,6 +70,8 @@ const RESOLUTIONS = {
 };
 const CAMERA_FPS = 30;
 
+const TRANSPORT_NAME = { usb: "USB", wifi: "Wi‑Fi", bluetooth: "Bluetooth" };
+
 function load() {
   try {
     return { ...DEFAULTS, ...JSON.parse(localStorage.getItem("phonebridge") || "{}") };
@@ -81,15 +96,23 @@ let addresses = [];
 // Pairing code, display form ("ABCDE-FGHJK-MNPQR-STVWX"); "" until loaded.
 let token = "";
 
+/** Disclosure rows show the chosen option's text next to the hidden native select. */
+function syncSelect(select) {
+  const out = document.querySelector(`.row-value[data-for="${select.id}"]`);
+  if (out) out.textContent = select.selectedOptions[0] ? select.selectedOptions[0].text : "";
+}
+
 function renderMute() {
   els.mute.setAttribute("aria-pressed", String(settings.muted));
   els.mute.setAttribute("aria-label", settings.muted ? "Unmute" : "Mute");
-  els.muteLabel.textContent = settings.muted ? "Muted" : "Live";
+  els.muteLabel.textContent = settings.muted ? "Muted" : "Mic on";
+  els.app.classList.toggle("muted", settings.muted);
 }
 
 function renderGain() {
   els.gain.value = settings.gain;
   els.gainValue.textContent = `${settings.gain}%`;
+  els.gain.style.setProperty("--fill", `${(settings.gain / 400) * 100}%`);
 }
 
 // Video is too slow over Bluetooth.
@@ -113,48 +136,50 @@ function el(tag, ...children) {
   return node;
 }
 
+/** The "Connect your PC" steps for the chosen transport. */
 function renderHint() {
   const port = settings.port;
   const portArg = (port === 8125 ? "" : ` --port ${port}`) + (cameraOn() ? " --camera" : "");
   const code = token || "PAIRING-CODE";
-  const file = "~/.config/phonebridge/token";
-  const nodes = [
-    el("p", "Save the pairing code on the PC once:"),
-    el("code", `echo ${code} | install -Dm600 /dev/stdin ${file}`),
-  ];
+  els.hintSave.textContent = `echo ${code} | install -Dm600 /dev/stdin ~/.config/phonebridge/token`;
+  let prep;
+  let cmds;
   switch (settings.transport) {
-    case "usb":
-      nodes.push(
-        el("p", "Enable USB debugging, plug the phone in and run on the PC:"),
-        el("code", `phonebridge${portArg}`),
-      );
-      break;
     case "wifi": {
       const ips = addresses.length ? addresses.map((a) => a.ip) : ["PHONE_IP"];
-      nodes.push(
-        el("p", "Same network as the PC. Run on the PC:"),
-        ...ips.map((ip) => el("code", `phonebridge --wifi ${ip}${portArg}`)),
-      );
+      prep = ["Put the phone and the PC on the same network."];
+      cmds = ips.map((ip) => `phonebridge --wifi ${ip}${portArg}`);
       break;
     }
     case "bluetooth":
-      nodes.push(
-        el(
-          "p",
-          "Pair the phone with the PC first, then run (phone address from ",
-          el("em", "bluetoothctl devices"),
-          "):",
-        ),
-        el("code", "phonebridge --bluetooth AA:BB:CC:DD:EE:FF"),
-      );
+      prep = [
+        "Pair the phone with the PC first. Its address is in ",
+        el("code", "bluetoothctl devices"),
+        ". Bluetooth carries the microphone only.",
+      ];
+      cmds = ["phonebridge --bluetooth AA:BB:CC:DD:EE:FF"];
       break;
+    default:
+      prep = ["Enable USB debugging and plug the phone into the PC."];
+      cmds = [`phonebridge${portArg}`];
   }
-  nodes.push(el("p", "Or pass the code with --token, or in PHONEBRIDGE_TOKEN."));
-  els.hint.replaceChildren(...nodes);
+  els.hintPrep.replaceChildren(...prep);
+  els.hintRun.replaceChildren(...cmds.map((c) => el("code", c)));
+  [...els.hintRun.children].forEach((c) => (c.className = "cmd"));
+  renderDock();
+}
+
+function renderDock() {
+  const parts = [TRANSPORT_NAME[settings.transport] || "USB"];
+  if (settings.transport === "wifi" && addresses.length) parts.push(addresses[0].ip);
+  if (settings.port !== 8125 && settings.transport !== "bluetooth") parts.push(`port ${settings.port}`);
+  parts.push(token ? `code ${token.split("-")[0]}…` : "pairing code");
+  els.dockSummary.textContent = parts.join(" · ");
 }
 
 function renderToken() {
   els.token.textContent = token || "…";
+  renderDock();
 }
 
 function renderInsecure() {
@@ -163,8 +188,10 @@ function renderInsecure() {
 }
 
 function renderControls() {
-  els.toggle.textContent = running ? "Stop" : "Start";
+  els.toggleLabel.textContent = running ? "Stop" : "Start";
+  els.toggle.setAttribute("aria-label", running ? "Stop" : "Start");
   els.toggle.classList.toggle("running", running);
+  els.app.classList.toggle("running", running);
   // Transport and port only apply when (re)starting.
   els.port.disabled = running;
   transportInputs.forEach((i) => (i.disabled = running));
@@ -172,12 +199,19 @@ function renderControls() {
   // The servers keep the code they started with.
   els.newCode.disabled = running;
   els.newCode.title = running ? "Stop to make a new code" : "";
+  els.runningNote.hidden = !running;
   // Camera settings apply live, but the camera is USB / Wi-Fi only.
   const bluetooth = settings.transport === "bluetooth";
   els.camera.disabled = bluetooth;
+  els.cameraToggle.classList.toggle("disabled", bluetooth);
   els.flip.disabled = bluetooth;
-  [els.lens, els.resolution, els.orientation].forEach((el) => (el.disabled = bluetooth));
+  [els.lens, els.resolution, els.orientation].forEach((s) => {
+    s.disabled = bluetooth;
+    s.closest(".row").classList.toggle("disabled", bluetooth);
+  });
+  [els.port, els.allowUnauth].forEach((i) => i.closest(".row").classList.toggle("disabled", running));
   els.cameraNote.hidden = !(bluetooth && settings.camera);
+  els.cameraToggle.dataset.on = String(settings.camera && !bluetooth);
 }
 
 const CAMERA_LABEL = {
@@ -198,6 +232,7 @@ function renderCamera(cam) {
   if (!running && settings.camera && state === "off") label = "On at start";
   els.cameraState.textContent = label;
   els.cameraState.dataset.state = state;
+  els.cameraLabel.textContent = cameraOn() ? "Camera on" : "Camera off";
 
   // Errors only matter while sharing is wanted.
   const error = cameraOn() && running ? camera.error : "";
@@ -225,6 +260,9 @@ function renderPreview() {
   else text = "Starting camera…";
   els.previewText.textContent = text;
   els.preview.dataset.state = open || state === "starting" ? "active" : "off";
+  // The floating preview card only exists while the camera is wanted.
+  els.previewWrap.hidden = !cameraOn();
+  els.app.classList.toggle("with-camera", cameraOn());
   previewVisible = open;
   reportPreview();
 }
@@ -232,7 +270,9 @@ function renderPreview() {
 // --------------------------------------------------------------- preview
 // The live preview is a native view over #preview (see CameraPreview.kt);
 // tell it where #preview is, in physical pixels relative to the WebView.
+// It is hidden while the settings sheet covers the home screen.
 let previewVisible = false;
+let sheetOpen = false;
 let lastRect = "";
 
 function reportPreview() {
@@ -245,7 +285,7 @@ function reportPreview() {
     width: Math.round(r.width * dpr),
     height: Math.round(r.height * dpr),
     radius: radius * dpr,
-    visible: previewVisible,
+    visible: previewVisible && !sheetOpen && r.width > 0 && r.height > 0,
   };
   const key = JSON.stringify(rect);
   if (key === lastRect) return;
@@ -275,10 +315,21 @@ function showError(msg) {
 }
 
 const STATE_LABEL = {
-  idle: "Stopped",
-  listening: "Waiting for PC",
-  connected: "Connected",
+  idle: "Ready when you are",
+  listening: "Waiting for your PC…",
+  connected: "Connected to PC",
 };
+
+function renderSubstatus(s) {
+  const transport = s && s.transport ? s.transport : settings.transport;
+  const name = TRANSPORT_NAME[transport] || "USB";
+  if (!running) {
+    els.substatus.textContent = `Tap to start over ${name}`;
+    return;
+  }
+  const ip = transport === "wifi" && addresses.length ? ` · ${addresses[0].ip}` : "";
+  els.substatus.textContent = `Over ${name}${ip}`;
+}
 
 async function poll() {
   try {
@@ -288,25 +339,68 @@ async function poll() {
     // runs them as separate instances): show both.
     const mic = s.state === "connected";
     const cam = s.camera && s.camera.state === "streaming";
-    let label = STATE_LABEL[s.state];
-    if (mic && cam) label = "Connected · mic + camera";
-    else if (cam) label = "Connected · camera";
-    else if (mic && s.peer) label = `Connected · ${s.peer}`;
+    let label = STATE_LABEL[s.state] || STATE_LABEL.idle;
+    if (mic && cam) label = "Connected to PC · mic + camera";
+    else if (cam) label = "Connected to PC · camera";
+    else if (mic && s.peer) label = `Connected to ${s.peer} · mic`;
+    else if (mic) label = "Connected to PC · mic";
+    const state = mic || cam ? "connected" : s.state;
     els.status.textContent = label;
-    els.status.dataset.state = mic || cam ? "connected" : s.state;
-    els.level.style.width = `${Math.min(100, Math.sqrt(s.level) * 100)}%`;
+    els.status.dataset.state = state;
+    els.app.dataset.state = state;
+    const level = settings.muted ? 0 : Math.min(1, Math.sqrt(s.level || 0));
+    els.app.style.setProperty("--level", level.toFixed(3));
     showError(s.error);
-    renderCamera(s.camera);
     const ips = JSON.stringify(s.addresses);
     if (ips !== JSON.stringify(addresses)) {
       addresses = s.addresses;
       renderHint();
     }
+    renderCamera(s.camera);
     renderControls();
+    renderSubstatus(s);
   } catch (e) {
     showError(String(e));
   }
 }
+
+// ------------------------------------------------------------------ sheet
+// The settings sheet. Android's back gesture closes it (via history).
+function setSheet(open) {
+  if (open === sheetOpen) return;
+  sheetOpen = open;
+  document.body.classList.toggle("sheet-open", open);
+  els.sheet.setAttribute("aria-hidden", String(!open));
+  els.sheet.inert = !open;
+  els.app.inert = open;
+  reportPreview();
+  if (open) els.sheet.focus({ preventScroll: true });
+  else els.openSheet.focus({ preventScroll: true });
+}
+
+function openSheet() {
+  if (sheetOpen) return;
+  try {
+    history.pushState({ sheet: true }, "");
+  } catch {
+    /* no history: Done and the scrim still close it */
+  }
+  setSheet(true);
+}
+
+function closeSheet() {
+  if (!sheetOpen) return;
+  if (history.state && history.state.sheet) history.back();
+  else setSheet(false);
+}
+
+window.addEventListener("popstate", () => setSheet(Boolean(history.state && history.state.sheet)));
+els.openSheet.addEventListener("click", openSheet);
+els.closeSheet.addEventListener("click", closeSheet);
+els.scrim.addEventListener("click", closeSheet);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeSheet();
+});
 
 // ------------------------------------------------------------------ actions
 els.toggle.addEventListener("click", async () => {
@@ -356,6 +450,8 @@ transportInputs.forEach((input) =>
     save();
     renderHint();
     renderControls();
+    renderCamera(camera);
+    renderSubstatus();
   }),
 );
 
@@ -372,6 +468,7 @@ els.port.addEventListener("change", () => {
 els.source.addEventListener("change", () => {
   settings.source = els.source.value;
   save();
+  syncSelect(els.source);
   invoke("set_source", { source: settings.source });
 });
 
@@ -392,6 +489,7 @@ els.camera.addEventListener("change", () => {
 
 function renderLens() {
   els.lens.value = settings.lens;
+  syncSelect(els.lens);
   els.flip.setAttribute(
     "aria-label",
     settings.lens === "front" ? "Switch to the back camera" : "Switch to the front camera",
@@ -409,6 +507,7 @@ for (const key of ["lens", "resolution", "orientation"]) {
   els[key].addEventListener("change", () => {
     settings[key] = key === "resolution" ? Number(els[key].value) : els[key].value;
     save();
+    syncSelect(els[key]);
     renderLens();
     if (cameraOn()) applyCamera();
   });
@@ -457,6 +556,7 @@ els.camera.checked = settings.camera;
 renderLens();
 els.resolution.value = String(settings.resolution);
 els.orientation.value = settings.orientation;
+[els.source, els.resolution, els.orientation].forEach(syncSelect);
 renderMute();
 renderGain();
 renderInsecure();
@@ -465,10 +565,20 @@ renderHint();
 loadToken();
 renderControls();
 renderCamera(camera);
+renderSubstatus();
+
+// Screenshot / deep-link hook: index.html?panel=open starts with settings open.
+if (new URLSearchParams(location.search).get("panel") === "open") {
+  document.body.classList.add("no-motion");
+  setSheet(true);
+  requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("no-motion")));
+}
 
 // One status request at a time: overlapping IPC calls pile up when the
-// WebView is busy.
+// WebView is busy. The preview rect is re-sent too (deduplicated), since the
+// home layout can shift without #preview itself resizing.
 (async function loop() {
   await poll();
+  reportPreview();
   setTimeout(loop, 150);
 })();

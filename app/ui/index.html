@@ -9,126 +9,157 @@
     <script src="main.js" defer></script>
   </head>
   <body>
-    <div class="app">
-      <!-- Fixed, never scrolls: the native camera preview is laid over #preview. -->
-      <section id="camera-top" class="top" aria-label="Camera">
-        <header>
-          <h1>Phonebridge</h1>
-          <span id="status" class="pill" data-state="idle">Stopped</span>
-        </header>
+    <!-- Home: one glance, never scrolls (the native camera preview is laid over #preview). -->
+    <div id="app" class="app" data-state="idle">
+      <header class="bar">
+        <span class="wordmark">Phonebridge</span>
+      </header>
 
-        <div id="preview" class="preview" data-state="off">
-          <div class="preview-msg">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4Z" />
-            </svg>
-            <span id="preview-text">Camera off</span>
+      <main class="stage">
+        <div id="preview-wrap" class="preview-wrap" hidden>
+          <div id="preview" class="preview" data-state="off">
+            <div class="preview-msg">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4Z" />
+              </svg>
+              <span id="preview-text">Camera off</span>
+            </div>
+          </div>
+          <div class="preview-caption">
+            <span id="camera-state" class="camera-state" data-state="off">Off</span>
+            <button id="flip" class="chip-btn" type="button" aria-label="Switch to the front camera">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 5h-3.17L15 3H9L7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm-5 11.5V14H9v2.5L5.5 13 9 9.5V12h6V9.5l3.5 3.5-3.5 3.5Z" />
+              </svg>
+              <span>Flip</span>
+            </button>
           </div>
         </div>
 
-        <div class="camera-bar">
-          <label class="switch">
-            <input id="camera" type="checkbox" />
-            <span>Share camera</span>
-          </label>
-          <span id="camera-state" class="camera-state" data-state="off">Off</span>
-          <button id="flip" class="icon-btn" type="button" aria-label="Switch to the front camera">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M20 5h-3.17L15 3H9L7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm-5 11.5V14H9v2.5L5.5 13 9 9.5V12h6V9.5l3.5 3.5-3.5 3.5Z" />
-            </svg>
-          </button>
+        <div class="core">
+          <!-- The orb: Start/Stop, and the live audio level (it breathes with --level). -->
+          <div class="orb-wrap">
+            <span class="halo halo-2" aria-hidden="true"></span>
+            <span class="halo halo-1" aria-hidden="true"></span>
+            <button id="toggle" class="orb" type="button">
+              <svg class="orb-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path class="play" d="M8 5.5v13a1 1 0 0 0 1.5.86l10.4-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5Z" />
+                <rect class="stop" x="5.5" y="5.5" width="13" height="13" rx="3" />
+              </svg>
+              <span id="toggle-label" class="orb-label">Start</span>
+            </button>
+          </div>
+
+          <p id="status" class="status" data-state="idle" aria-live="polite">Ready when you are</p>
+          <p id="substatus" class="substatus"></p>
+          <p id="error" class="error" hidden></p>
+
+          <div class="toggles">
+            <button id="mute" class="round" type="button" aria-pressed="false" aria-label="Mute">
+              <span class="round-face">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="on" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
+                  <path class="off" d="M19 11h-2c0 .74-.16 1.43-.45 2.06l1.47 1.47A6.96 6.96 0 0 0 19 11ZM15 11.17V5a3 3 0 0 0-5.94-.6L15 10.34v.83ZM4.27 3 3 4.27l6 6V11a3 3 0 0 0 4.42 2.64l1.6 1.6A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.92V21h2v-3.08a6.9 6.9 0 0 0 2.86-1.02L19.73 21 21 19.73 4.27 3Z" />
+                </svg>
+              </span>
+              <span id="mute-label" class="round-label">Mic on</span>
+            </button>
+
+            <label id="camera-toggle" class="round" data-on="false">
+              <input id="camera" type="checkbox" aria-label="Share camera" />
+              <span class="round-face">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4Z" />
+                </svg>
+              </span>
+              <span id="camera-label" class="round-label">Camera off</span>
+            </label>
+          </div>
+
+          <p id="camera-note" class="note" hidden>Camera sharing needs USB or Wi‑Fi</p>
+          <div id="camera-problem" class="camera-problem" hidden>
+            <p id="camera-error" class="error"></p>
+            <button id="camera-settings" class="text-btn strong" type="button" hidden>Open settings</button>
+          </div>
         </div>
+      </main>
 
-        <p id="camera-note" class="note" hidden>Camera sharing needs USB or Wi‑Fi</p>
-        <div id="camera-problem" class="camera-problem" hidden>
-          <p id="camera-error" class="error"></p>
-          <button id="camera-settings" class="link-btn" type="button" hidden>Open settings</button>
-        </div>
-      </section>
+      <footer class="dock">
+        <button id="open-sheet" class="dock-btn" type="button" aria-haspopup="dialog" aria-controls="sheet">
+          <span class="dock-text">
+            <span class="dock-title">Settings &amp; pairing</span>
+            <span id="dock-summary" class="dock-summary">USB</span>
+          </span>
+          <svg class="chev-up" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6" /></svg>
+        </button>
+      </footer>
+    </div>
 
-      <main class="scroll">
-        <section class="card mic">
-          <button id="mute" class="mute" aria-pressed="false" aria-label="Mute">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path class="on" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
-              <path class="off" d="M19 11h-2c0 .74-.16 1.43-.45 2.06l1.47 1.47A6.96 6.96 0 0 0 19 11ZM15 11.17V5a3 3 0 0 0-5.94-.6L15 10.34v.83ZM4.27 3 3 4.27l6 6V11a3 3 0 0 0 4.42 2.64l1.6 1.6A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.92V21h2v-3.08a6.9 6.9 0 0 0 2.86-1.02L19.73 21 21 19.73 4.27 3Z" />
-            </svg>
-          </button>
-          <span id="mute-label" class="mute-label">Live</span>
-          <div class="meter" aria-hidden="true"><div id="level"></div></div>
+    <!-- Settings: a bottom sheet with inset grouped lists. -->
+    <div id="scrim" class="scrim"></div>
+    <section id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" aria-hidden="true" tabindex="-1" inert>
+      <div class="sheet-head">
+        <span class="grabber" aria-hidden="true"></span>
+        <h2 id="sheet-title">Settings</h2>
+        <button id="close-sheet" class="text-btn strong" type="button">Done</button>
+      </div>
 
-          <label class="slider">
-            <span class="row"><span>Volume</span><output id="gain-value">100%</output></span>
+      <div class="sheet-body">
+        <!-- Connect your PC, step by step. -->
+        <h3 class="group-title">Connect your PC</h3>
+        <ol class="group steps">
+          <li class="step">
+            <span class="step-n" aria-hidden="true">1</span>
+            <div class="step-body">
+              <p class="step-title">Choose how the phone reaches the PC</p>
+              <div class="segmented" role="radiogroup" aria-label="Transport">
+                <label><input type="radio" name="transport" value="usb" checked /><span>USB</span></label>
+                <label><input type="radio" name="transport" value="wifi" /><span>Wi‑Fi</span></label>
+                <label><input type="radio" name="transport" value="bluetooth" /><span>Bluetooth</span></label>
+              </div>
+              <p id="hint-prep" class="step-text"></p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-n" aria-hidden="true">2</span>
+            <div class="step-body">
+              <div class="step-head">
+                <p class="step-title">Save this pairing code on the PC</p>
+                <button id="new-code" class="text-btn" type="button">New code</button>
+              </div>
+              <output id="token" class="token" aria-live="polite">…</output>
+              <code id="hint-save" class="cmd"></code>
+              <p id="token-note" class="step-text">Once is enough. A new code locks out PCs that have the old one.</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-n" aria-hidden="true">3</span>
+            <div class="step-body">
+              <p class="step-title">Run on the PC</p>
+              <div id="hint-run" class="cmds"></div>
+              <p class="step-text">Or pass the code with <code>--token</code>, or in <code>PHONEBRIDGE_TOKEN</code>.</p>
+            </div>
+          </li>
+          <li class="step">
+            <span class="step-n" aria-hidden="true">4</span>
+            <div class="step-body">
+              <p class="step-title">Tap Start on the phone</p>
+              <p class="step-text">The orb turns green once the PC is connected.</p>
+            </div>
+          </li>
+        </ol>
+
+        <h3 class="group-title">Microphone</h3>
+        <div class="group">
+          <label class="row slider-row">
+            <span class="row-top"><span class="row-label">Volume</span><output id="gain-value" class="row-value">100%</output></span>
             <input id="gain" type="range" min="0" max="400" step="5" value="100" />
           </label>
-        </section>
-
-        <button id="toggle" class="primary">Start</button>
-        <p id="error" class="error" hidden></p>
-
-        <section id="camera-card" class="card">
-          <h2>Camera</h2>
-          <label class="field">
-            <span>Camera</span>
-            <select id="lens">
-              <option value="back">Back</option>
-              <option value="front">Front</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Resolution</span>
-            <select id="resolution">
-              <option value="480">480p</option>
-              <option value="720">720p</option>
-              <option value="1080">1080p</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Orientation (how the phone is held)</span>
-            <select id="orientation">
-              <option value="landscape">Landscape</option>
-              <option value="portrait">Portrait</option>
-            </select>
-          </label>
-          <p class="note">Changes apply right away, also while sharing.</p>
-        </section>
-
-        <section class="card">
-          <h2>Connection</h2>
-          <div class="segmented" role="radiogroup" aria-label="Transport">
-            <label><input type="radio" name="transport" value="usb" checked /><span>USB</span></label>
-            <label><input type="radio" name="transport" value="wifi" /><span>Wi‑Fi</span></label>
-            <label><input type="radio" name="transport" value="bluetooth" /><span>Bluetooth</span></label>
-          </div>
-
-          <label class="field">
-            <span>Control port</span>
-            <input id="port" type="number" inputmode="numeric" min="1" max="65535" value="8125" />
-          </label>
-
-          <div class="pairing">
-            <div class="pairing-head">
-              <span>Pairing code</span>
-              <button id="new-code" class="link-btn" type="button">New code</button>
-            </div>
-            <output id="token" class="token" aria-live="polite">…</output>
-            <p id="token-note" class="note">The PC needs this code to connect. A new code locks out PCs that have the old one.</p>
-          </div>
-
-          <div id="hint" class="hint"></div>
-
-          <label class="switch insecure">
-            <span>Allow clients without the pairing code (official WO Mic client, insecure)</span>
-            <input id="allow-unauth" type="checkbox" />
-          </label>
-          <p id="insecure-note" class="note warn" hidden>Anyone who can reach the phone can listen to the microphone while this is on.</p>
-        </section>
-
-        <section class="card">
-          <h2>Audio</h2>
-          <label class="field">
-            <span>Audio source</span>
-            <select id="source">
+          <label class="row disclosure">
+            <span class="row-label">Audio source</span>
+            <span class="row-value" data-for="source"></span>
+            <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            <select id="source" aria-label="Audio source">
               <option value="mic">Microphone</option>
               <option value="camcorder">Camcorder</option>
               <option value="voice_recognition">Voice recognition (no processing)</option>
@@ -137,13 +168,59 @@
               <option value="voice_performance">Voice performance (Android 10+)</option>
             </select>
           </label>
-
-          <label class="switch">
-            <span>Keep screen on while connected</span>
-            <input id="keep-screen" type="checkbox" checked />
+          <label class="row">
+            <span class="row-label">Keep screen on while connected</span>
+            <input id="keep-screen" class="switch" type="checkbox" role="switch" checked />
           </label>
-        </section>
-      </main>
-    </div>
+        </div>
+
+        <h3 class="group-title">Camera</h3>
+        <div class="group" id="camera-card">
+          <label class="row disclosure">
+            <span class="row-label">Lens</span>
+            <span class="row-value" data-for="lens"></span>
+            <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            <select id="lens" aria-label="Camera">
+              <option value="back">Back</option>
+              <option value="front">Front</option>
+            </select>
+          </label>
+          <label class="row disclosure">
+            <span class="row-label">Resolution</span>
+            <span class="row-value" data-for="resolution"></span>
+            <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            <select id="resolution" aria-label="Resolution">
+              <option value="480">480p</option>
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+            </select>
+          </label>
+          <label class="row disclosure">
+            <span class="row-label">Orientation<small>How the phone is held</small></span>
+            <span class="row-value" data-for="orientation"></span>
+            <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            <select id="orientation" aria-label="Orientation (how the phone is held)">
+              <option value="landscape">Landscape</option>
+              <option value="portrait">Portrait</option>
+            </select>
+          </label>
+        </div>
+        <p class="group-foot">Changes apply right away, also while sharing. The camera needs USB or Wi‑Fi.</p>
+
+        <h3 class="group-title">Advanced</h3>
+        <div class="group">
+          <label class="row">
+            <span class="row-label">Control port</span>
+            <input id="port" class="inline-input" type="number" inputmode="numeric" min="1" max="65535" value="8125" />
+          </label>
+          <label class="row">
+            <span class="row-label">Allow clients without the pairing code<small>Official WO Mic client · insecure</small></span>
+            <input id="allow-unauth" class="switch" type="checkbox" role="switch" />
+          </label>
+        </div>
+        <p id="insecure-note" class="group-foot warn" hidden>Anyone who can reach the phone can listen to the microphone while this is on.</p>
+        <p id="running-note" class="group-foot" hidden>Stop to change the connection, port or pairing code.</p>
+      </div>
+    </section>
   </body>
 </html>
