@@ -2,22 +2,27 @@ const { invoke } = window.__TAURI__.core;
 
 const $ = (id) => document.getElementById(id);
 const els = {
+  app: $("app"),
   status: $("status"),
   mute: $("mute"),
+  muteShape: $("mute-shape"),
   muteLabel: $("mute-label"),
+  muteHint: $("mute-hint"),
   level: $("level"),
   gain: $("gain"),
   gainValue: $("gain-value"),
   toggle: $("toggle"),
+  toggleLabel: $("toggle-label"),
   error: $("error"),
   port: $("port"),
-  source: $("source"),
   keepScreen: $("keep-screen"),
   hint: $("hint"),
   token: $("token"),
   newCode: $("new-code"),
   allowUnauth: $("allow-unauth"),
   insecureNote: $("insecure-note"),
+  navBadge: $("nav-badge"),
+  stage: $("stage"),
   camera: $("camera"),
   cameraState: $("camera-state"),
   cameraNote: $("camera-note"),
@@ -27,11 +32,26 @@ const els = {
   preview: $("preview"),
   previewText: $("preview-text"),
   flip: $("flip"),
-  lens: $("lens"),
-  resolution: $("resolution"),
-  orientation: $("orientation"),
+  scroll: $("scroll"),
+  sumTransport: $("sum-transport"),
+  sumTransportSub: $("sum-transport-sub"),
+  sumTransportIcon: $("sum-transport-icon"),
+  sumToken: $("sum-token"),
+  sumSource: $("sum-source"),
 };
-const transportInputs = [...document.querySelectorAll('input[name="transport"]')];
+
+/** Radio groups (segmented buttons, chips, radio lists) by input name. */
+const radios = (name) => [...document.querySelectorAll(`input[name="${name}"]`)];
+const groups = {
+  transport: radios("transport"),
+  lens: radios("lens"),
+  resolution: radios("resolution"),
+  orientation: radios("orientation"),
+  source: radios("source"),
+};
+function setRadio(name, value) {
+  groups[name].forEach((i) => (i.checked = i.value === String(value)));
+}
 
 // ------------------------------------------------------------------ settings
 const DEFAULTS = {
@@ -75,6 +95,61 @@ function save() {
   }
 }
 
+// ------------------------------------------------------------------ navigation
+// Home / Camera / Connection / Audio. The stage (camera preview) belongs to
+// Home and Camera only; elsewhere the native preview is told to hide.
+const TABS = ["home", "camera", "connection", "audio"];
+const navButtons = [...document.querySelectorAll(".nav button")];
+const panels = [...document.querySelectorAll("[data-panel]")];
+let tab = "home";
+
+const stageShown = () => tab === "home" || tab === "camera";
+
+function setTab(next) {
+  if (!TABS.includes(next)) next = "home";
+  tab = next;
+  els.app.dataset.tab = tab;
+  panels.forEach((p) => {
+    p.hidden = p.dataset.panel !== tab;
+    p.classList.remove("enter");
+    // Expressive entrance on user navigation only.
+    if (!p.hidden && document.body.classList.contains("ready")) {
+      void p.offsetWidth;
+      p.classList.add("enter");
+    }
+  });
+  navButtons.forEach((b) =>
+    b.dataset.tab === tab ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"),
+  );
+  els.stage.hidden = !stageShown();
+  els.scroll.scrollTop = 0;
+  reportPreview();
+}
+
+navButtons.forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
+document.querySelectorAll("[data-goto]").forEach((b) =>
+  b.addEventListener("click", () => setTab(b.dataset.goto)),
+);
+
+// ------------------------------------------------------------------ mic shape
+// Expressive mute button: a "cookie" while live, morphing to a rounded
+// square when muted (CSS transitions the path's `d`; same point count).
+function shapePath(r) {
+  const n = 96;
+  let d = "";
+  for (let k = 0; k < n; k++) {
+    const t = (k / n) * Math.PI * 2;
+    const rr = r(t);
+    d += `${k ? "L" : "M"}${(50 + rr * Math.cos(t)).toFixed(2)} ${(50 + rr * Math.sin(t)).toFixed(2)}`;
+  }
+  return `path("${d}Z")`;
+}
+els.muteShape.style.setProperty("--shape-live", shapePath((t) => 45 + 3.6 * Math.cos(9 * t)));
+els.muteShape.style.setProperty(
+  "--shape-muted",
+  shapePath((t) => 46 / Math.pow(Math.abs(Math.cos(t)) ** 5 + Math.abs(Math.sin(t)) ** 5, 1 / 5)),
+);
+
 // ------------------------------------------------------------------ rendering
 let running = false;
 let addresses = [];
@@ -85,10 +160,12 @@ function renderMute() {
   els.mute.setAttribute("aria-pressed", String(settings.muted));
   els.mute.setAttribute("aria-label", settings.muted ? "Unmute" : "Mute");
   els.muteLabel.textContent = settings.muted ? "Muted" : "Live";
+  els.muteHint.textContent = settings.muted ? "Tap the mic to unmute" : "Tap the mic to mute";
 }
 
 function renderGain() {
   els.gain.value = settings.gain;
+  els.gain.style.setProperty("--pct", `${(settings.gain / 400) * 100}%`);
   els.gainValue.textContent = `${settings.gain}%`;
 }
 
@@ -112,6 +189,12 @@ function el(tag, ...children) {
   node.append(...children);
   return node;
 }
+
+const TRANSPORT = {
+  usb: { name: "USB", icon: "#i-usb" },
+  wifi: { name: "Wi‑Fi", icon: "#i-wifi" },
+  bluetooth: { name: "Bluetooth", icon: "#i-bt" },
+};
 
 function renderHint() {
   const port = settings.port;
@@ -151,23 +234,55 @@ function renderHint() {
   }
   nodes.push(el("p", "Or pass the code with --token, or in PHONEBRIDGE_TOKEN."));
   els.hint.replaceChildren(...nodes);
+  renderSummary();
 }
 
+/** Home's quick-settings list. */
+function renderSummary() {
+  const t = TRANSPORT[settings.transport] || TRANSPORT.usb;
+  els.sumTransport.textContent = t.name;
+  els.sumTransportIcon.setAttribute("href", t.icon);
+  let sub;
+  if (settings.transport === "bluetooth") sub = "Microphone only · PC command";
+  else if (settings.transport === "wifi" && addresses.length)
+    sub = `${addresses.map((a) => a.ip).join(", ")} · port ${settings.port}`;
+  else sub = `Port ${settings.port} · PC command`;
+  els.sumTransportSub.textContent = sub;
+  els.sumToken.textContent = token || "…";
+  const src = groups.source.find((i) => i.value === settings.source);
+  els.sumSource.textContent = src
+    ? src.closest("label").querySelector(".headline").textContent
+    : settings.source;
+}
+
+/** The code in large monospace groups. */
 function renderToken() {
-  els.token.textContent = token || "…";
+  if (!token) {
+    els.token.textContent = "…";
+  } else {
+    const parts = [];
+    token.split("-").forEach((g, i) => {
+      if (i) parts.push(Object.assign(el("span", "-"), { className: "sep" }));
+      parts.push(Object.assign(el("span", g), { className: "group" }));
+    });
+    els.token.replaceChildren(...parts);
+  }
+  renderSummary();
 }
 
 function renderInsecure() {
   els.allowUnauth.checked = settings.allowUnauthenticated;
   els.insecureNote.hidden = !settings.allowUnauthenticated;
+  els.navBadge.hidden = !settings.allowUnauthenticated;
 }
 
 function renderControls() {
-  els.toggle.textContent = running ? "Stop" : "Start";
+  els.toggleLabel.textContent = running ? "Stop" : "Start";
   els.toggle.classList.toggle("running", running);
+  els.app.dataset.running = String(running);
   // Transport and port only apply when (re)starting.
   els.port.disabled = running;
-  transportInputs.forEach((i) => (i.disabled = running));
+  groups.transport.forEach((i) => (i.disabled = running));
   els.allowUnauth.disabled = running;
   // The servers keep the code they started with.
   els.newCode.disabled = running;
@@ -176,7 +291,9 @@ function renderControls() {
   const bluetooth = settings.transport === "bluetooth";
   els.camera.disabled = bluetooth;
   els.flip.disabled = bluetooth;
-  [els.lens, els.resolution, els.orientation].forEach((el) => (el.disabled = bluetooth));
+  [...groups.lens, ...groups.resolution, ...groups.orientation].forEach(
+    (i) => (i.disabled = bluetooth),
+  );
   els.cameraNote.hidden = !(bluetooth && settings.camera);
 }
 
@@ -225,6 +342,8 @@ function renderPreview() {
   else text = "Starting camera…";
   els.previewText.textContent = text;
   els.preview.dataset.state = open || state === "starting" ? "active" : "off";
+  // A compact placeholder while sharing is off, full size otherwise.
+  els.stage.dataset.camera = cameraOn() ? "on" : "off";
   previewVisible = open;
   reportPreview();
 }
@@ -245,7 +364,7 @@ function reportPreview() {
     width: Math.round(r.width * dpr),
     height: Math.round(r.height * dpr),
     radius: radius * dpr,
-    visible: previewVisible,
+    visible: previewVisible && stageShown() && r.width > 0 && r.height > 0,
   };
   const key = JSON.stringify(rect);
   if (key === lastRect) return;
@@ -257,6 +376,8 @@ function reportPreview() {
 
 if (window.ResizeObserver) new ResizeObserver(reportPreview).observe(els.preview);
 window.addEventListener("resize", reportPreview);
+// The preview's height animates when sharing is toggled; follow it to the end.
+els.preview.addEventListener("transitionend", reportPreview);
 
 // Camera switches while running, one at a time, in order.
 let cameraQueue = Promise.resolve();
@@ -294,7 +415,9 @@ async function poll() {
     else if (mic && s.peer) label = `Connected · ${s.peer}`;
     els.status.textContent = label;
     els.status.dataset.state = mic || cam ? "connected" : s.state;
-    els.level.style.width = `${Math.min(100, Math.sqrt(s.level) * 100)}%`;
+    const level = Math.min(1, Math.sqrt(s.level));
+    els.level.style.width = `${level * 100}%`;
+    els.mute.style.setProperty("--level", level.toFixed(3));
     showError(s.error);
     renderCamera(s.camera);
     const ips = JSON.stringify(s.addresses);
@@ -350,12 +473,13 @@ els.gain.addEventListener("input", () => {
   invoke("set_gain", { gain: settings.gain / 100 });
 });
 
-transportInputs.forEach((input) =>
+groups.transport.forEach((input) =>
   input.addEventListener("change", () => {
     settings.transport = input.value;
     save();
     renderHint();
     renderControls();
+    renderCamera(camera);
   }),
 );
 
@@ -369,11 +493,14 @@ els.port.addEventListener("change", () => {
   renderHint();
 });
 
-els.source.addEventListener("change", () => {
-  settings.source = els.source.value;
-  save();
-  invoke("set_source", { source: settings.source });
-});
+groups.source.forEach((input) =>
+  input.addEventListener("change", () => {
+    settings.source = input.value;
+    save();
+    renderSummary();
+    invoke("set_source", { source: settings.source });
+  }),
+);
 
 els.keepScreen.addEventListener("change", () => {
   settings.keepScreenOn = els.keepScreen.checked;
@@ -391,11 +518,12 @@ els.camera.addEventListener("change", () => {
 });
 
 function renderLens() {
-  els.lens.value = settings.lens;
+  setRadio("lens", settings.lens);
   els.flip.setAttribute(
     "aria-label",
     settings.lens === "front" ? "Switch to the back camera" : "Switch to the front camera",
   );
+  els.flip.dataset.lens = settings.lens;
 }
 
 els.flip.addEventListener("click", () => {
@@ -406,12 +534,14 @@ els.flip.addEventListener("click", () => {
 });
 
 for (const key of ["lens", "resolution", "orientation"]) {
-  els[key].addEventListener("change", () => {
-    settings[key] = key === "resolution" ? Number(els[key].value) : els[key].value;
-    save();
-    renderLens();
-    if (cameraOn()) applyCamera();
-  });
+  groups[key].forEach((input) =>
+    input.addEventListener("change", () => {
+      settings[key] = key === "resolution" ? Number(input.value) : input.value;
+      save();
+      renderLens();
+      if (cameraOn()) applyCamera();
+    }),
+  );
 }
 
 els.allowUnauth.addEventListener("change", () => {
@@ -449,14 +579,14 @@ els.cameraSettings.addEventListener("click", () => {
 });
 
 // ------------------------------------------------------------------ init
-transportInputs.forEach((i) => (i.checked = i.value === settings.transport));
+setRadio("transport", settings.transport);
 els.port.value = settings.port;
-els.source.value = settings.source;
+setRadio("source", settings.source);
 els.keepScreen.checked = settings.keepScreenOn;
 els.camera.checked = settings.camera;
 renderLens();
-els.resolution.value = String(settings.resolution);
-els.orientation.value = settings.orientation;
+setRadio("resolution", settings.resolution);
+setRadio("orientation", settings.orientation);
 renderMute();
 renderGain();
 renderInsecure();
@@ -465,6 +595,10 @@ renderHint();
 loadToken();
 renderControls();
 renderCamera(camera);
+// Deep link to a destination, e.g. index.html#/connection.
+setTab(location.hash.replace(/^#\/?/, ""));
+// Enable transitions only after the first paint (no animation on load).
+requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.add("ready")));
 
 // One status request at a time: overlapping IPC calls pile up when the
 // WebView is busy.

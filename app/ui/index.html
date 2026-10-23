@@ -9,14 +9,18 @@
     <script src="main.js" defer></script>
   </head>
   <body>
-    <div class="app">
-      <!-- Fixed, never scrolls: the native camera preview is laid over #preview. -->
-      <section id="camera-top" class="top" aria-label="Camera">
-        <header>
-          <h1>Phonebridge</h1>
-          <span id="status" class="pill" data-state="idle">Stopped</span>
-        </header>
+    <div id="app" class="app" data-tab="home" data-running="false">
+      <!-- Top app bar: title + connection status as an assist chip. -->
+      <header class="top-bar">
+        <h1 class="title">Phonebridge</h1>
+        <span id="status" class="status-chip" data-state="idle" role="status">Stopped</span>
+      </header>
 
+      <div id="error" class="banner banner-error" role="alert" hidden></div>
+
+      <!-- Stage: never scrolls, the native camera preview is laid over #preview.
+           Shown on the Home and Camera destinations only. -->
+      <section id="stage" class="stage" data-camera="off" aria-label="Camera">
         <div id="preview" class="preview" data-state="off">
           <div class="preview-msg">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -27,11 +31,19 @@
         </div>
 
         <div class="camera-bar">
-          <label class="switch">
-            <input id="camera" type="checkbox" />
-            <span>Share camera</span>
+          <label class="camera-toggle">
+            <span class="camera-text">
+              <span class="headline">Share camera</span>
+              <span id="camera-state" class="camera-state" data-state="off">Off</span>
+            </span>
+            <input id="camera" class="switch-input" type="checkbox" />
+            <span class="switch" aria-hidden="true">
+              <span class="thumb">
+                <svg class="i-on" viewBox="0 0 24 24"><use href="#i-check" /></svg>
+                <svg class="i-off" viewBox="0 0 24 24"><use href="#i-close" /></svg>
+              </span>
+            </span>
           </label>
-          <span id="camera-state" class="camera-state" data-state="off">Off</span>
           <button id="flip" class="icon-btn" type="button" aria-label="Switch to the front camera">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M20 5h-3.17L15 3H9L7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm-5 11.5V14H9v2.5L5.5 13 9 9.5V12h6V9.5l3.5 3.5-3.5 3.5Z" />
@@ -39,111 +51,226 @@
           </button>
         </div>
 
-        <p id="camera-note" class="note" hidden>Camera sharing needs USB or Wi‑Fi</p>
-        <div id="camera-problem" class="camera-problem" hidden>
-          <p id="camera-error" class="error"></p>
-          <button id="camera-settings" class="link-btn" type="button" hidden>Open settings</button>
+        <p id="camera-note" class="supporting stage-note" hidden>Camera sharing needs USB or Wi‑Fi</p>
+        <div id="camera-problem" class="banner banner-error" hidden>
+          <p id="camera-error"></p>
+          <button id="camera-settings" class="text-btn" type="button" hidden>Open settings</button>
         </div>
       </section>
 
-      <main class="scroll">
-        <section class="card mic">
-          <button id="mute" class="mute" aria-pressed="false" aria-label="Mute">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path class="on" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
-              <path class="off" d="M19 11h-2c0 .74-.16 1.43-.45 2.06l1.47 1.47A6.96 6.96 0 0 0 19 11ZM15 11.17V5a3 3 0 0 0-5.94-.6L15 10.34v.83ZM4.27 3 3 4.27l6 6V11a3 3 0 0 0 4.42 2.64l1.6 1.6A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.92V21h2v-3.08a6.9 6.9 0 0 0 2.86-1.02L19.73 21 21 19.73 4.27 3Z" />
-            </svg>
-          </button>
-          <span id="mute-label" class="mute-label">Live</span>
-          <div class="meter" aria-hidden="true"><div id="level"></div></div>
+      <main id="scroll" class="content">
+        <!-- ============================================================ Home -->
+        <section class="panel" data-panel="home" aria-label="Home">
+          <div class="mic-card">
+            <div class="mic-row">
+              <button id="mute" class="mute" type="button" aria-pressed="false" aria-label="Mute">
+                <span class="halo" aria-hidden="true"></span>
+                <svg class="shape" viewBox="0 0 100 100" aria-hidden="true"><path id="mute-shape" d="M50 6a44 44 0 1 1 0 88a44 44 0 1 1 0-88Z" /></svg>
+                <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="on" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
+                  <path class="off" d="M19 11h-2c0 .74-.16 1.43-.45 2.06l1.47 1.47A6.960 6.960 0 0 0 19 11ZM15 11.17V5a3 3 0 0 0-5.94-.6L15 10.34v.83ZM4.27 3 3 4.27l6 6V11a3 3 0 0 0 4.42 2.64l1.6 1.6A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.92V21h2v-3.08a6.9 6.9 0 0 0 2.86-1.020L19.73 21 21 19.73 4.27 3Z" />
+                </svg>
+              </button>
+              <div class="mic-info">
+                <span id="mute-label" class="mute-label">Live</span>
+                <span id="mute-hint" class="supporting">Tap the mic to mute</span>
+                <div class="meter" aria-hidden="true"><div id="level"></div></div>
+              </div>
+            </div>
 
-          <label class="slider">
-            <span class="row"><span>Volume</span><output id="gain-value">100%</output></span>
-            <input id="gain" type="range" min="0" max="400" step="5" value="100" />
-          </label>
-        </section>
-
-        <button id="toggle" class="primary">Start</button>
-        <p id="error" class="error" hidden></p>
-
-        <section id="camera-card" class="card">
-          <h2>Camera</h2>
-          <label class="field">
-            <span>Camera</span>
-            <select id="lens">
-              <option value="back">Back</option>
-              <option value="front">Front</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Resolution</span>
-            <select id="resolution">
-              <option value="480">480p</option>
-              <option value="720">720p</option>
-              <option value="1080">1080p</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Orientation (how the phone is held)</span>
-            <select id="orientation">
-              <option value="landscape">Landscape</option>
-              <option value="portrait">Portrait</option>
-            </select>
-          </label>
-          <p class="note">Changes apply right away, also while sharing.</p>
-        </section>
-
-        <section class="card">
-          <h2>Connection</h2>
-          <div class="segmented" role="radiogroup" aria-label="Transport">
-            <label><input type="radio" name="transport" value="usb" checked /><span>USB</span></label>
-            <label><input type="radio" name="transport" value="wifi" /><span>Wi‑Fi</span></label>
-            <label><input type="radio" name="transport" value="bluetooth" /><span>Bluetooth</span></label>
+            <label class="slider">
+              <span class="slider-head">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3Zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02ZM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77Z" /></svg>
+                <span>Volume</span>
+                <output id="gain-value" class="value-badge">100%</output>
+              </span>
+              <input id="gain" type="range" min="0" max="400" step="5" value="100" />
+            </label>
           </div>
 
-          <label class="field">
-            <span>Control port</span>
-            <input id="port" type="number" inputmode="numeric" min="1" max="65535" value="8125" />
-          </label>
+          <h2 class="section-title">Quick settings</h2>
+          <div class="list">
+            <button class="list-item" type="button" data-goto="connection">
+              <span class="lead"><svg viewBox="0 0 24 24" aria-hidden="true"><use id="sum-transport-icon" href="#i-usb" /></svg></span>
+              <span class="text">
+                <span id="sum-transport" class="headline">USB</span>
+                <span id="sum-transport-sub" class="supporting">Port 8125 · see the PC command</span>
+              </span>
+              <svg class="trail" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chev" /></svg>
+            </button>
+            <button class="list-item" type="button" data-goto="connection">
+              <span class="lead"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-key" /></svg></span>
+              <span class="text">
+                <span class="headline">Pairing code</span>
+                <span id="sum-token" class="supporting mono">…</span>
+              </span>
+              <svg class="trail" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chev" /></svg>
+            </button>
+            <button class="list-item" type="button" data-goto="audio">
+              <span class="lead"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-eq" /></svg></span>
+              <span class="text">
+                <span class="headline">Audio source</span>
+                <span id="sum-source" class="supporting">Microphone</span>
+              </span>
+              <svg class="trail" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chev" /></svg>
+            </button>
+          </div>
+        </section>
 
-          <div class="pairing">
+        <!-- ========================================================== Camera -->
+        <section id="camera-card" class="panel" data-panel="camera" aria-label="Camera settings" hidden>
+          <h2 class="section-title">Lens</h2>
+          <div class="chips" role="radiogroup" aria-label="Lens">
+            <label class="chip"><input type="radio" name="lens" value="back" /><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><span>Back</span></label>
+            <label class="chip"><input type="radio" name="lens" value="front" /><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><span>Front</span></label>
+          </div>
+
+          <h2 class="section-title">Resolution</h2>
+          <div class="chips" role="radiogroup" aria-label="Resolution">
+            <label class="chip"><input type="radio" name="resolution" value="480" /><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><span>480p</span></label>
+            <label class="chip"><input type="radio" name="resolution" value="720" /><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><span>720p</span></label>
+            <label class="chip"><input type="radio" name="resolution" value="1080" /><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><span>1080p</span></label>
+          </div>
+
+          <h2 class="section-title">Orientation <span class="dim">· how the phone is held</span></h2>
+          <div class="segmented" role="radiogroup" aria-label="Orientation">
+            <label><input type="radio" name="orientation" value="landscape" /><span><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 12H5V7h14v10Z" /></svg>Landscape</span></label>
+            <label><input type="radio" name="orientation" value="portrait" /><span><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Zm0 16H7V5h10v14Z" /></svg>Portrait</span></label>
+          </div>
+
+          <p class="info-line">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-info" /></svg>
+            <span>Changes apply right away, also while sharing.</span>
+          </p>
+        </section>
+
+        <!-- ====================================================== Connection -->
+        <section class="panel" data-panel="connection" aria-label="Connection" hidden>
+          <h2 class="section-title">Transport</h2>
+          <div class="segmented" role="radiogroup" aria-label="Transport">
+            <label><input type="radio" name="transport" value="usb" checked /><span><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-usb" /></svg>USB</span></label>
+            <label><input type="radio" name="transport" value="wifi" /><span><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wifi" /></svg>Wi‑Fi</span></label>
+            <label><input type="radio" name="transport" value="bluetooth" /><span><svg class="chk" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-bt" /></svg>Bluetooth</span></label>
+          </div>
+
+          <label class="text-field">
+            <input id="port" type="number" inputmode="numeric" min="1" max="65535" value="8125" />
+            <span class="tf-label">Control port</span>
+          </label>
+          <p class="tf-support">Default 8125. Transport and port apply when you press Start.</p>
+
+          <div class="pairing-card">
             <div class="pairing-head">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-key" /></svg>
               <span>Pairing code</span>
-              <button id="new-code" class="link-btn" type="button">New code</button>
             </div>
             <output id="token" class="token" aria-live="polite">…</output>
-            <p id="token-note" class="note">The PC needs this code to connect. A new code locks out PCs that have the old one.</p>
+            <p id="token-note" class="pairing-note">The PC needs this code to connect. A new code locks out PCs that have the old one.</p>
+            <button id="new-code" class="tonal-btn" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z" /></svg>
+              <span>New code</span>
+            </button>
           </div>
 
+          <h2 class="section-title">On the PC</h2>
           <div id="hint" class="hint"></div>
 
-          <label class="switch insecure">
-            <span>Allow clients without the pairing code (official WO Mic client, insecure)</span>
-            <input id="allow-unauth" type="checkbox" />
-          </label>
-          <p id="insecure-note" class="note warn" hidden>Anyone who can reach the phone can listen to the microphone while this is on.</p>
+          <h2 class="section-title">Security</h2>
+          <div class="list">
+            <label class="list-item">
+              <span class="lead"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4Zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8Z" /></svg></span>
+              <span class="text">
+                <span class="headline">Allow clients without the code</span>
+                <span class="supporting">Official WO Mic client, insecure</span>
+              </span>
+              <input id="allow-unauth" class="switch-input" type="checkbox" />
+              <span class="switch" aria-hidden="true">
+                <span class="thumb">
+                  <svg class="i-on" viewBox="0 0 24 24"><use href="#i-check" /></svg>
+                  <svg class="i-off" viewBox="0 0 24 24"><use href="#i-close" /></svg>
+                </span>
+              </span>
+            </label>
+          </div>
+          <p id="insecure-note" class="banner banner-warn" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z" /></svg>
+            <span>Anyone who can reach the phone can listen to the microphone while this is on.</span>
+          </p>
         </section>
 
-        <section class="card">
-          <h2>Audio</h2>
-          <label class="field">
-            <span>Audio source</span>
-            <select id="source">
-              <option value="mic">Microphone</option>
-              <option value="camcorder">Camcorder</option>
-              <option value="voice_recognition">Voice recognition (no processing)</option>
-              <option value="voice_communication">Voice call (echo &amp; noise cancel)</option>
-              <option value="unprocessed">Unprocessed (raw)</option>
-              <option value="voice_performance">Voice performance (Android 10+)</option>
-            </select>
-          </label>
+        <!-- =========================================================== Audio -->
+        <section class="panel" data-panel="audio" aria-label="Audio" hidden>
+          <h2 class="section-title">Audio source</h2>
+          <div class="list" role="radiogroup" aria-label="Audio source">
+            <label class="list-item"><span class="text"><span class="headline">Microphone</span><span class="supporting">Default, with the phone's processing</span></span><input type="radio" name="source" value="mic" /><span class="radio" aria-hidden="true"></span></label>
+            <label class="list-item"><span class="text"><span class="headline">Camcorder</span><span class="supporting">Tuned for recording video</span></span><input type="radio" name="source" value="camcorder" /><span class="radio" aria-hidden="true"></span></label>
+            <label class="list-item"><span class="text"><span class="headline">Voice recognition</span><span class="supporting">No processing</span></span><input type="radio" name="source" value="voice_recognition" /><span class="radio" aria-hidden="true"></span></label>
+            <label class="list-item"><span class="text"><span class="headline">Voice call</span><span class="supporting">Echo &amp; noise cancel</span></span><input type="radio" name="source" value="voice_communication" /><span class="radio" aria-hidden="true"></span></label>
+            <label class="list-item"><span class="text"><span class="headline">Unprocessed</span><span class="supporting">Raw signal</span></span><input type="radio" name="source" value="unprocessed" /><span class="radio" aria-hidden="true"></span></label>
+            <label class="list-item"><span class="text"><span class="headline">Voice performance</span><span class="supporting">Android 10+</span></span><input type="radio" name="source" value="voice_performance" /><span class="radio" aria-hidden="true"></span></label>
+          </div>
 
-          <label class="switch">
-            <span>Keep screen on while connected</span>
-            <input id="keep-screen" type="checkbox" checked />
-          </label>
+          <h2 class="section-title">Display</h2>
+          <div class="list">
+            <label class="list-item">
+              <span class="lead"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69ZM12 18a6 6 0 1 1 0-12 6 6 0 0 1 0 12Zm0-10a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" /></svg></span>
+              <span class="text">
+                <span class="headline">Keep screen on</span>
+                <span class="supporting">While connected</span>
+              </span>
+              <input id="keep-screen" class="switch-input" type="checkbox" checked />
+              <span class="switch" aria-hidden="true">
+                <span class="thumb">
+                  <svg class="i-on" viewBox="0 0 24 24"><use href="#i-check" /></svg>
+                  <svg class="i-off" viewBox="0 0 24 24"><use href="#i-close" /></svg>
+                </span>
+              </span>
+            </label>
+          </div>
         </section>
       </main>
+
+      <!-- Extended FAB: Start / Stop, morphs shape and colour while running. -->
+      <button id="toggle" class="fab" type="button">
+        <svg class="fab-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path class="play" d="M8 5v14l11-7z" />
+          <path class="stop" d="M7 7h10v10H7z" />
+        </svg>
+        <span id="toggle-label">Start</span>
+      </button>
+
+      <!-- Navigation bar (a rail in landscape). -->
+      <nav class="nav" aria-label="Sections">
+        <button type="button" data-tab="home" aria-current="page">
+          <span class="ind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" /></svg></span>
+          <span class="lbl">Home</span>
+        </button>
+        <button type="button" data-tab="camera">
+          <span class="ind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4Z" /></svg></span>
+          <span class="lbl">Camera</span>
+        </button>
+        <button type="button" data-tab="connection">
+          <span class="ind"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.9 12A3.1 3.1 0 0 1 7 8.9h4V7H7a5 5 0 0 0 0 10h4v-1.9H7A3.1 3.1 0 0 1 3.9 12ZM8 13h8v-2H8v2Zm9-6h-4v1.9h4a3.1 3.1 0 0 1 0 6.2h-4V17h4a5 5 0 0 0 0-10Z" /></svg><span id="nav-badge" class="badge" hidden></span></span>
+          <span class="lbl">Connection</span>
+        </button>
+        <button type="button" data-tab="audio">
+          <span class="ind"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-eq" /></svg></span>
+          <span class="lbl">Audio</span>
+        </button>
+      </nav>
     </div>
+
+    <!-- Shared icons (Material Symbols). -->
+    <svg class="sprite" aria-hidden="true">
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" /></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" /></symbol>
+      <symbol id="i-chev" viewBox="0 0 24 24"><path d="M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" /></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm1 15h-2v-6h2v6Zm0-8h-2V7h2v2Z" /></symbol>
+      <symbol id="i-key" viewBox="0 0 24 24"><path d="M12.65 10A6 6 0 0 0 7 6a6 6 0 1 0 5.65 8H17v4h4v-4h2v-4H12.65ZM7 14a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z" /></symbol>
+      <symbol id="i-eq" viewBox="0 0 24 24"><path d="M7 18h2V6H7v12Zm4 4h2V2h-2v20Zm-8-8h2v-4H3v4Zm12 4h2V6h-2v12Zm4-8v4h2v-4h-2Z" /></symbol>
+      <symbol id="i-usb" viewBox="0 0 24 24"><path d="M15 7v4h1v2h-3V5h2l-3-4-3 4h2v8H8v-2.07A2.2 2.2 0 0 0 7 6.8a2.2 2.2 0 0 0-1 4.13V13a2 2 0 0 0 2 2h3v3.05A2.2 2.2 0 1 0 13 18.05V15h3a2 2 0 0 0 2-2v-2h1V7h-4Z" /></symbol>
+      <symbol id="i-wifi" viewBox="0 0 24 24"><path d="m1 9 2 2a12.73 12.73 0 0 1 18 0l2-2C16.930 2.930 7.080 2.930 1 9Zm8 8 3 3 3-3a4.240 4.240 0 0 0-6 0Zm-4-4 2 2a7.070 7.070 0 0 1 10 0l2-2a9.900 9.900 0 0 0-14 0Z" /></symbol>
+      <symbol id="i-bt" viewBox="0 0 24 24"><path d="M17.71 7.71 12 2h-1v7.59L6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 11 14.41V22h1l5.710-5.710-4.300-4.290 4.300-4.290ZM13 5.830l1.880 1.880L13 9.590V5.830Zm1.880 10.460L13 18.170v-3.760l1.880 1.880Z" /></symbol>
+    </svg>
   </body>
 </html>
