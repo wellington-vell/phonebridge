@@ -140,10 +140,16 @@ impl Platform {
         self.call("openAppSettings", json!({})).map(drop)
     }
 
-    /// Whether a virtual background picture is stored.
-    pub fn background_chosen(&self) -> Result<bool, String> {
-        self.call("backgroundStatus", json!({}))
-            .map(|v| flag(&v, "chosen"))
+    /// {chosen, thumbnail?} for the user's own background photo; on desktop
+    /// none is chosen.
+    pub fn background_status(&self) -> Result<Value, String> {
+        self.call("backgroundStatus", json!({})).map(|v| {
+            if v.is_object() {
+                v
+            } else {
+                json!({ "chosen": false })
+            }
+        })
     }
 
     /// Let the user choose the virtual background picture (system picker);

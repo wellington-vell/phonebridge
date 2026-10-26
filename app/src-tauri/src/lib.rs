@@ -77,10 +77,10 @@ pub struct CameraConfig {
     /// "landscape" or "portrait": how the phone is held, for the rotation
     /// the PC applies.
     pub orientation: String,
-    /// Send the virtual background picture, so the PC puts it behind the
-    /// person.
+    /// Virtual background the PC puts behind the person: "" off, a built-in
+    /// one ("studio", "office", "daylight") or "custom" (the user's photo).
     #[serde(default)]
-    pub background: bool,
+    pub background: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -324,10 +324,11 @@ async fn set_preview_rect(app: AppHandle, rect: PreviewRect) -> Result<(), Strin
     Ok(())
 }
 
-/// Whether a virtual background picture has been chosen.
+/// {chosen, thumbnail?}: whether the user chose a photo of their own, and a
+/// small data URL of it for the picker.
 #[tauri::command]
-async fn background_status(app: AppHandle) -> Result<bool, String> {
-    app.state::<Platform>().background_chosen()
+async fn background_status(app: AppHandle) -> Result<Value, String> {
+    app.state::<Platform>().background_status()
 }
 
 /// Choose the virtual background picture; false if cancelled. Takes effect

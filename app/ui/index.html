@@ -208,9 +208,25 @@
             <span class="row-label">Virtual background<small>The PC puts your picture behind you</small></span>
             <input id="background" class="switch" type="checkbox" role="switch" />
           </label>
+          <div class="bg-pick" role="radiogroup" aria-label="Background picture">
+            <button class="bg-tile" type="button" role="radio" data-bg="studio">
+              <img src="backgrounds/studio.jpg" alt="" /><span>Studio</span>
+            </button>
+            <button class="bg-tile" type="button" role="radio" data-bg="office">
+              <img src="backgrounds/office.jpg" alt="" /><span>Office</span>
+            </button>
+            <button class="bg-tile" type="button" role="radio" data-bg="daylight">
+              <img src="backgrounds/daylight.jpg" alt="" /><span>Daylight</span>
+            </button>
+            <button class="bg-tile custom" type="button" role="radio" data-bg="custom">
+              <img id="custom-thumb" alt="" hidden />
+              <svg class="bg-add" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              <span>Your photo</span>
+            </button>
+          </div>
           <div class="row">
-            <span class="row-label">Background picture<small id="background-state">None chosen</small></span>
-            <button id="pick-background" class="text-btn row-btn" type="button">Choose</button>
+            <span class="row-label"><small id="background-state">Pick one, or use a photo of your own</small></span>
+            <button id="pick-background" class="text-btn row-btn" type="button">Choose photo</button>
           </div>
         </div>
         <p class="group-foot">Changes apply right away, also while sharing. The camera needs USB or Wi‑Fi.</p>

@@ -7,11 +7,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.provider.Settings
+import android.util.Base64
 import android.view.WindowManager
 import androidx.activity.result.ActivityResult
 import androidx.appcompat.app.AppCompatActivity
@@ -58,8 +60,11 @@ class CameraArgs {
     var token: String = ""
     /** Also accept clients without the pairing code (plaintext PBV1). */
     var allowUnauthenticated: Boolean = false
-    /** Send the virtual background picture (from pickBackground), if there is one. */
-    var background: Boolean = false
+    /**
+     * Virtual background sent to the PC: "" off, a built-in one ("studio",
+     * "office", "daylight") or "custom" (the photo from pickBackground).
+     */
+    var background: String = ""
 }
 
 @InvokeArg
@@ -203,7 +208,7 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
             portrait = args.orientation == "portrait",
             token = SecureChannel.canonicalCode(args.token),
             allowUnauthenticated = args.allowUnauthenticated,
-            background = if (args.background) runCatching { backgroundFile.readBytes() }.getOrNull() else null,
+            background = backgroundBytes(args.background),
         )
         try {
             var streamer: CameraStreamer? = null
@@ -263,13 +268,51 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
         resolveToken(invoke, storeNewToken())
     }
 
-    /** The virtual background picture, a JPEG the PC puts behind the person. */
+    /** The user's own virtual background picture, a JPEG the PC puts behind the person. */
     private val backgroundFile get() = File(activity.filesDir, "background.jpg")
 
-    /** Whether a virtual background picture has been chosen. */
+    /** Built-in backgrounds (res/raw, made by app/backgrounds/generate.py). */
+    private val builtInBackgrounds = mapOf(
+        "studio" to R.raw.bg_studio,
+        "office" to R.raw.bg_office,
+        "daylight" to R.raw.bg_daylight,
+    )
+
+    /** The JPEG for a CameraArgs.background name; null when off or missing. */
+    private fun backgroundBytes(name: String): ByteArray? = runCatching {
+        when (name) {
+            "" -> null
+            "custom" -> backgroundFile.readBytes()
+            else -> builtInBackgrounds[name]?.let { id ->
+                activity.resources.openRawResource(id).use { it.readBytes() }
+            }
+        }
+    }.getOrNull()
+
+    /**
+     * Whether the user chose a photo of their own, and a small JPEG data URL
+     * of it for the picker.
+     */
     @Command
     fun backgroundStatus(invoke: Invoke) {
-        invoke.resolve(JSObject().apply { put("chosen", backgroundFile.isFile) })
+        thread(name = "phonebridge-background") {
+            val ret = JSObject()
+            ret.put("chosen", backgroundFile.isFile)
+            runCatching { thumbnail() }.getOrNull()?.let { ret.put("thumbnail", it) }
+            invoke.resolve(ret)
+        }
+    }
+
+    private fun thumbnail(): String? {
+        if (!backgroundFile.isFile) return null
+        val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+        val full = BitmapFactory.decodeFile(backgroundFile.path, opts) ?: return null
+        val thumb = Bitmap.createScaledBitmap(full, 320, 320 * full.height / maxOf(1, full.width), true)
+        val out = java.io.ByteArrayOutputStream()
+        thumb.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        if (thumb !== full) thumb.recycle()
+        full.recycle()
+        return "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
     /** Let the user choose the virtual background picture; resolves `{ picked }` (false: cancelled). */

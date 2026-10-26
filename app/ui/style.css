@@ -619,6 +619,72 @@ code,
 .row-btn {
   margin-right: -10px;
 }
+
+/* Virtual background picker: three built-in pictures and the user's photo. */
+.bg-pick {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 2px 16px 8px;
+}
+.bg-tile {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--fill);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--hair);
+}
+.bg-tile img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.bg-tile span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 10px 4px 3px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: #fff;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.55));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bg-tile.custom:not(.has-photo) span {
+  color: var(--muted);
+  background: none;
+}
+.bg-add {
+  position: absolute;
+  left: 50%;
+  top: 38%;
+  width: 18px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.bg-tile.has-photo .bg-add {
+  display: none;
+}
+.bg-tile[aria-checked="true"] {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.bg-pick.off .bg-tile {
+  opacity: 0.55;
+}
 .text-btn:disabled {
   color: var(--muted);
   opacity: 0.6;

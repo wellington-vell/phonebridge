@@ -41,6 +41,7 @@ const els = {
   background: $("background"),
   backgroundState: $("background-state"),
   pickBackground: $("pick-background"),
+  customThumb: $("custom-thumb"),
   sheet: $("sheet"),
   scrim: $("scrim"),
   openSheet: $("open-sheet"),
@@ -63,8 +64,10 @@ const DEFAULTS = {
   lens: "back",
   resolution: 720,
   orientation: "landscape",
-  // Virtual background: the picture (stored on the phone) goes to the PC.
+  // Virtual background: the picture goes to the PC, which puts it behind you.
   background: false,
+  // "studio" | "office" | "daylight" (built in) | "custom" (your photo)
+  backgroundImage: "studio",
 };
 
 // 16:9 sizes asked of the camera; the phone picks the closest it supports.
@@ -77,9 +80,14 @@ const CAMERA_FPS = 30;
 
 const TRANSPORT_NAME = { usb: "USB", wifi: "Wi‑Fi", bluetooth: "Bluetooth" };
 
+// Keys in the stored settings, to tell old settings from new defaults.
+let savedKeys = new Set();
+
 function load() {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem("phonebridge") || "{}") };
+    const saved = JSON.parse(localStorage.getItem("phonebridge") || "{}");
+    savedKeys = new Set(Object.keys(saved));
+    return { ...DEFAULTS, ...saved };
   } catch {
     return { ...DEFAULTS };
   }
@@ -131,7 +139,7 @@ function cameraConfig() {
     ...(RESOLUTIONS[settings.resolution] || RESOLUTIONS[720]),
     fps: CAMERA_FPS,
     orientation: settings.orientation,
-    background: settings.background,
+    background: settings.background ? settings.backgroundImage : "",
   };
 }
 
@@ -519,26 +527,44 @@ for (const key of ["lens", "resolution", "orientation"]) {
   });
 }
 
-// Whether a background picture is stored on the phone.
+// Whether the user has a photo of their own on the phone.
 let backgroundChosen = false;
+const bgTiles = [...document.querySelectorAll(".bg-tile")];
 
 function renderBackground() {
   els.background.checked = settings.background;
-  els.backgroundState.textContent = backgroundChosen ? "Chosen" : "None chosen";
-  els.pickBackground.textContent = backgroundChosen ? "Change" : "Choose";
+  document.querySelector(".bg-pick").classList.toggle("off", !settings.background);
+  for (const tile of bgTiles) {
+    tile.setAttribute("aria-checked", String(tile.dataset.bg === settings.backgroundImage));
+  }
+  const custom = bgTiles.find((t) => t.dataset.bg === "custom");
+  custom.classList.toggle("has-photo", backgroundChosen && !els.customThumb.hidden);
+  els.backgroundState.textContent =
+    settings.backgroundImage === "custom" ? "Your photo" : "Pick one, or use a photo of your own";
+  els.pickBackground.textContent = backgroundChosen ? "Change photo" : "Choose photo";
 }
 
-/** System picture picker; a new picture turns the background on. */
+/** Use `name` as the background, and turn it on. */
+function selectBackground(name) {
+  const changed = !settings.background || settings.backgroundImage !== name;
+  settings.backgroundImage = name;
+  settings.background = true;
+  save();
+  renderBackground();
+  // The picture goes to the PC when the camera (re)starts.
+  if (changed && cameraOn()) applyCamera();
+}
+
+/** System picture picker; a new photo becomes the background. */
 async function pickBackground() {
   els.pickBackground.disabled = true;
   showError("");
   try {
     if (await invoke("pick_background")) {
-      backgroundChosen = true;
-      settings.background = true;
-      save();
-      // The picture goes to the PC when the camera (re)starts.
-      if (cameraOn()) applyCamera();
+      await loadBackground();
+      // Same name, new picture: restart even if it was already selected.
+      settings.backgroundImage = "";
+      selectBackground("custom");
     }
   } catch (e) {
     showError(String(e));
@@ -549,24 +575,43 @@ async function pickBackground() {
 }
 
 els.background.addEventListener("change", () => {
-  if (els.background.checked && !backgroundChosen) {
-    // Needs a picture first; the picker turns it on.
-    els.background.checked = false;
-    pickBackground();
-    return;
+  if (els.background.checked && settings.backgroundImage === "custom" && !backgroundChosen) {
+    settings.backgroundImage = DEFAULTS.backgroundImage;
   }
   settings.background = els.background.checked;
   save();
+  renderBackground();
   if (cameraOn()) applyCamera();
 });
+
+for (const tile of bgTiles) {
+  tile.addEventListener("click", () => {
+    const name = tile.dataset.bg;
+    // Your photo: the picker when there is none yet.
+    if (name === "custom" && !backgroundChosen) pickBackground();
+    else selectBackground(name);
+  });
+}
 
 els.pickBackground.addEventListener("click", pickBackground);
 
 async function loadBackground() {
+  let status = {};
   try {
-    backgroundChosen = await invoke("background_status");
+    status = (await invoke("background_status")) || {};
   } catch {
-    backgroundChosen = false;
+    /* no photo */
+  }
+  backgroundChosen = Boolean(status.chosen);
+  els.customThumb.hidden = !status.thumbnail;
+  if (status.thumbnail) els.customThumb.src = status.thumbnail;
+  // Before the built-in pictures the only background was your photo.
+  if (!savedKeys.has("backgroundImage") && backgroundChosen) {
+    settings.backgroundImage = "custom";
+    save();
+  }
+  if (settings.backgroundImage === "custom" && !backgroundChosen) {
+    settings.backgroundImage = DEFAULTS.backgroundImage;
   }
   renderBackground();
 }

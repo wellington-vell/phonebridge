@@ -166,9 +166,12 @@ that is using it never sees it vanish or change size: its video just resumes.
 
 #### Virtual background
 
-Turn on **Virtual background** in the phone app's camera settings and choose a
-picture. The phone sends the picture to the PC with the video, and the PC cuts
-you out of each frame and puts you in front of it. Segmentation uses
+Turn on **Virtual background** in the phone app's camera settings and pick a
+picture: one of the three built in (**Studio**, a graphite backdrop; **Office**,
+a softly defocused workspace; **Daylight**, a light wall with window-blind
+shadows) or **Your photo**, any picture from the phone. The phone sends the
+picture to the PC with the video, and the PC cuts you out of each frame and
+puts you in front of it. Segmentation uses
 [MediaPipe Selfie Segmentation](models/README.md), run on the CPU by
 [tract](https://github.com/sonos/tract), which is built into the binary (about
 4 ms per frame, on its own thread so it never holds the video back). A portrait
@@ -315,8 +318,10 @@ speaks it).
   front camera at 480p, 720p or 1080p (30 fps), landscape or portrait, over USB
   or Wi-Fi. Camera settings apply live without interrupting the microphone; if
   the camera permission is refused the mic still works
-- **Virtual background**: choose a picture and the PC replaces what's behind
-  you with it (see [Virtual background](#virtual-background))
+- **Virtual background**: pick a built-in picture or one of your own, and the
+  PC replaces what's behind you with it (see
+  [Virtual background](#virtual-background)); the built-in ones are generated
+  by `app/backgrounds/generate.py`
 - **Keep screen on while connected**, plus a foreground service so capture
   keeps running with the screen off
 
