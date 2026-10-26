@@ -164,6 +164,19 @@ the last picture stays for up to 3 s. So the device is always a valid camera
 (`exclusive_caps=1` hides a loopback device that has no writer), and an app
 that is using it never sees it vanish or change size: its video just resumes.
 
+#### Virtual background
+
+Turn on **Virtual background** in the phone app's camera settings and choose a
+picture. The phone sends the picture to the PC with the video, and the PC cuts
+you out of each frame and puts you in front of it. Segmentation uses
+[MediaPipe Selfie Segmentation](models/README.md), run on the CPU by
+[tract](https://github.com/sonos/tract), which is built into the binary (about
+4 ms per frame, on its own thread so it never holds the video back). A portrait
+picture in a landscape webcam fills the side bars with the picture too.
+Turning it on or off, or choosing another picture, reconnects the stream, so
+the last frame stays for a moment. If the phone app is older than this
+feature, the client streams without a background.
+
 #### Google Meet, Microsoft Teams and other browser apps
 
 1. Start the webcam (`phonebridge camera start`, or the bar widget) **before**
@@ -302,6 +315,8 @@ speaks it).
   front camera at 480p, 720p or 1080p (30 fps), landscape or portrait, over USB
   or Wi-Fi. Camera settings apply live without interrupting the microphone; if
   the camera permission is refused the mic still works
+- **Virtual background**: choose a picture and the PC replaces what's behind
+  you with it (see [Virtual background](#virtual-background))
 - **Keep screen on while connected**, plus a foreground service so capture
   keeps running with the screen off
 
@@ -381,11 +396,17 @@ A separate TCP stream on the video port (control port + 1, default 8126;
 server, one client at a time. Big-endian:
 
 ```
-PC → phone   "PBV1"
-phone → PC   "PBV1" [status u8][codec u8][width u16][height u16][rotation u16][fps u8]
+PC → phone   "PBV2" (or "PBV1")
+phone → PC   the same magic, [status u8][codec u8][width u16][height u16][rotation u16][fps u8]
              on status != 0: [msg_len u16][UTF-8 message], then close
+             PBV2, status 0: [bg_len u32][bg_len bytes of JPEG]
 phone → PC   repeated: [len u32][pts_us u64][flags u8][len bytes of H.264 Annex-B]
 ```
+
+- PBV2 adds the virtual background picture: a JPEG of at most 1920x1080
+  (`bg_len` 0 = off; the PC refuses more than 4 MiB). Phone apps from before
+  PBV2 close the connection on `"PBV2"`, and the PC then asks again with
+  `"PBV1"`.
 
 - `codec` 1 = H.264 Annex-B; `flags` bit 0 = keyframe, bit 1 = codec config.
 - Each client first gets the SPS/PPS (codec config), then a keyframe; keyframes

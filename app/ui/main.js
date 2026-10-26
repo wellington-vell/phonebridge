@@ -38,6 +38,9 @@ const els = {
   lens: $("lens"),
   resolution: $("resolution"),
   orientation: $("orientation"),
+  background: $("background"),
+  backgroundState: $("background-state"),
+  pickBackground: $("pick-background"),
   sheet: $("sheet"),
   scrim: $("scrim"),
   openSheet: $("open-sheet"),
@@ -60,6 +63,8 @@ const DEFAULTS = {
   lens: "back",
   resolution: 720,
   orientation: "landscape",
+  // Virtual background: the picture (stored on the phone) goes to the PC.
+  background: false,
 };
 
 // 16:9 sizes asked of the camera; the phone picks the closest it supports.
@@ -126,6 +131,7 @@ function cameraConfig() {
     ...(RESOLUTIONS[settings.resolution] || RESOLUTIONS[720]),
     fps: CAMERA_FPS,
     orientation: settings.orientation,
+    background: settings.background,
   };
 }
 
@@ -513,6 +519,58 @@ for (const key of ["lens", "resolution", "orientation"]) {
   });
 }
 
+// Whether a background picture is stored on the phone.
+let backgroundChosen = false;
+
+function renderBackground() {
+  els.background.checked = settings.background;
+  els.backgroundState.textContent = backgroundChosen ? "Chosen" : "None chosen";
+  els.pickBackground.textContent = backgroundChosen ? "Change" : "Choose";
+}
+
+/** System picture picker; a new picture turns the background on. */
+async function pickBackground() {
+  els.pickBackground.disabled = true;
+  showError("");
+  try {
+    if (await invoke("pick_background")) {
+      backgroundChosen = true;
+      settings.background = true;
+      save();
+      // The picture goes to the PC when the camera (re)starts.
+      if (cameraOn()) applyCamera();
+    }
+  } catch (e) {
+    showError(String(e));
+  } finally {
+    els.pickBackground.disabled = false;
+    renderBackground();
+  }
+}
+
+els.background.addEventListener("change", () => {
+  if (els.background.checked && !backgroundChosen) {
+    // Needs a picture first; the picker turns it on.
+    els.background.checked = false;
+    pickBackground();
+    return;
+  }
+  settings.background = els.background.checked;
+  save();
+  if (cameraOn()) applyCamera();
+});
+
+els.pickBackground.addEventListener("click", pickBackground);
+
+async function loadBackground() {
+  try {
+    backgroundChosen = await invoke("background_status");
+  } catch {
+    backgroundChosen = false;
+  }
+  renderBackground();
+}
+
 els.allowUnauth.addEventListener("change", () => {
   settings.allowUnauthenticated = els.allowUnauth.checked;
   save();
@@ -554,6 +612,8 @@ els.source.value = settings.source;
 els.keepScreen.checked = settings.keepScreenOn;
 els.camera.checked = settings.camera;
 renderLens();
+renderBackground();
+loadBackground();
 els.resolution.value = String(settings.resolution);
 els.orientation.value = settings.orientation;
 [els.source, els.resolution, els.orientation].forEach(syncSelect);

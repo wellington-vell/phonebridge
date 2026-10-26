@@ -14,13 +14,18 @@
 //! placeholder at a low rate.
 //!
 //! Wire protocol (big-endian):
-//!   -> "PBV1"
-//!   <- "PBV1" [status u8][codec u8][width u16][height u16][rotation u16][fps u8]
+//!   -> "PBV2" (or "PBV1")
+//!   <- the same magic, then [status u8][codec u8][width u16][height u16][rotation u16][fps u8]
 //!        status != 0: [msg_len u16][UTF-8 msg] follows and the phone closes
 //!        (1: camera sharing disabled on the phone, 2: camera unavailable)
 //!        codec 1: H.264 Annex-B; rotation: degrees clockwise to display upright
+//!        PBV2, status 0: [bg_len u32][bg_len bytes JPEG] follows, the virtual
+//!        background picture (0: none; see `background`)
 //!   <- frames: [len u32][pts_us u64][flags u8][len bytes of H.264 Annex-B]
 //!        flags: bit0 keyframe, bit1 codec config (SPS/PPS, always sent first)
+//!
+//! Phone apps from before PBV2 close the connection on "PBV2"; the client then
+//! asks again with "PBV1" (no background).
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -31,18 +36,22 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::background::{self, Compositor};
 use crate::control::Live;
 use crate::log;
 use crate::secure;
-use crate::transport::{self, Transport};
+use crate::transport::{self, Conn, Transport};
 
-const MAGIC: &[u8; 4] = b"PBV1";
+const MAGIC_V1: &[u8; 4] = b"PBV1";
+const MAGIC_V2: &[u8; 4] = b"PBV2";
 const CODEC_H264: u8 = 1;
 /// "PBV1" + status + codec + width + height + rotation + fps.
 const REPLY: usize = 13;
 const FRAME_HEADER: usize = 13;
 /// Far above any sane H.264 access unit; guards against a desynced stream.
 const MAX_FRAME: usize = 16 << 20;
+/// Largest background picture accepted (the phone sends at most 1920x1080).
+const MAX_PICTURE: usize = 4 << 20;
 /// Card label set by the NixOS module / suggested modprobe options.
 pub const CARD_LABEL: &str = "Phonebridge";
 const RETRY: Duration = Duration::from_secs(3);
@@ -50,7 +59,7 @@ const RETRY: Duration = Duration::from_secs(3);
 pub const DEFAULT_SIZE: (u32, u32) = (1280, 720);
 /// YUYV, the classic webcam format: Chromium and Firefox both read it from
 /// v4l2loopback (as they do I420).
-const PIX_FMT: &str = "yuyv422";
+pub(crate) const PIX_FMT: &str = "yuyv422";
 const BYTES_PER_PIXEL: usize = 2;
 /// Frame interval while the phone isn't streaming (5 fps): enough for
 /// readers that give up on a silent device, cheap otherwise.
@@ -85,8 +94,12 @@ pub struct Info {
 
 #[derive(Debug, PartialEq)]
 enum Hello {
-    Ready(Info),
-    Refused { status: u8, msg: String },
+    /// With the background picture (JPEG), if the phone sent one.
+    Ready(Info, Option<Vec<u8>>),
+    Refused {
+        status: u8,
+        msg: String,
+    },
 }
 
 fn invalid(msg: String) -> io::Error {
@@ -101,8 +114,8 @@ fn recv_exact(sock: &mut impl Read, buf: &mut [u8]) -> io::Result<()> {
 }
 
 /// Split the fixed-size reply into its status and stream parameters.
-fn parse_reply(r: &[u8; REPLY]) -> io::Result<(u8, Info)> {
-    if &r[..4] != MAGIC {
+fn parse_reply(r: &[u8; REPLY], magic: &[u8; 4]) -> io::Result<(u8, Info)> {
+    if &r[..4] != magic {
         return Err(invalid(format!(
             "not a Phonebridge video stream (got {:02x?})",
             &r[..4]
@@ -121,13 +134,40 @@ fn parse_reply(r: &[u8; REPLY]) -> io::Result<(u8, Info)> {
     ))
 }
 
-fn hello(sock: &mut (impl Read + Write)) -> io::Result<Hello> {
-    sock.write_all(MAGIC)?;
+/// Why [`hello`] failed: `NoReply` when the phone closed without answering
+/// (an app from before PBV2 does that on "PBV2").
+#[derive(Debug)]
+enum HelloError {
+    NoReply(io::Error),
+    Other(io::Error),
+}
+
+impl From<io::Error> for HelloError {
+    fn from(e: io::Error) -> Self {
+        HelloError::Other(e)
+    }
+}
+
+impl From<HelloError> for io::Error {
+    fn from(e: HelloError) -> Self {
+        match e {
+            HelloError::NoReply(e) | HelloError::Other(e) => e,
+        }
+    }
+}
+
+fn hello(sock: &mut (impl Read + Write), v2: bool) -> Result<Hello, HelloError> {
+    let magic = if v2 { MAGIC_V2 } else { MAGIC_V1 };
+    sock.write_all(magic)?;
     let mut reply = [0u8; REPLY];
-    recv_exact(sock, &mut reply)?;
-    let (status, info) = parse_reply(&reply)?;
+    recv_exact(sock, &mut reply).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => HelloError::NoReply(e),
+        _ => HelloError::Other(e),
+    })?;
+    let (status, info) = parse_reply(&reply, magic)?;
     if status == 0 {
-        return Ok(Hello::Ready(info));
+        let picture = if v2 { read_picture(sock)? } else { None };
+        return Ok(Hello::Ready(info, picture));
     }
     // The message is best effort: the phone closes right after it.
     let mut msg = String::new();
@@ -143,6 +183,24 @@ fn hello(sock: &mut (impl Read + Write)) -> io::Result<Hello> {
         }
     }
     Ok(Hello::Refused { status, msg })
+}
+
+/// PBV2's background picture: [bg_len u32][JPEG].
+fn read_picture(sock: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+    let mut len = [0u8; 4];
+    recv_exact(sock, &mut len)?;
+    let len = u32::from_be_bytes(len) as usize;
+    if len > MAX_PICTURE {
+        return Err(invalid(format!(
+            "background picture of {len} bytes (at most {MAX_PICTURE})"
+        )));
+    }
+    if len == 0 {
+        return Ok(None);
+    }
+    let mut buf = vec![0u8; len];
+    recv_exact(sock, &mut buf)?;
+    Ok(Some(buf))
 }
 
 #[derive(Debug, PartialEq)]
@@ -191,7 +249,7 @@ pub fn parse_size(s: &str) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
-fn frame_size((w, h): (u32, u32)) -> usize {
+pub(crate) fn frame_size((w, h): (u32, u32)) -> usize {
     w as usize * h as usize * BYTES_PER_PIXEL
 }
 
@@ -208,8 +266,10 @@ fn rotate_filter(rotation: u16) -> Option<&'static str> {
 /// Rotate upright, then fit into the webcam size without distortion. When the
 /// aspect ratios match that's a plain scale; otherwise (portrait into a
 /// landscape webcam) the picture is centred over a blurred, zoomed copy of
-/// itself instead of black bars, as phones and video-call apps do.
-fn video_filter(info: &Info, (w, h): (u32, u32)) -> String {
+/// itself instead of black bars, as phones and video-call apps do. With a
+/// virtual background (`plain_bars`) the bars stay black: they count as
+/// background, so the picture shows there too.
+fn video_filter(info: &Info, (w, h): (u32, u32), plain_bars: bool) -> String {
     let mut f = rotate_filter(info.rotation)
         .map(|r| format!("{r},"))
         .unwrap_or_default();
@@ -218,7 +278,7 @@ fn video_filter(info: &Info, (w, h): (u32, u32)) -> String {
         _ => (info.width, info.height),
     };
     let fit = format!("scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2");
-    if u64::from(sw) * u64::from(h) == u64::from(sh) * u64::from(w) {
+    if plain_bars || u64::from(sw) * u64::from(h) == u64::from(sh) * u64::from(w) {
         f += &format!("{fit},pad={w}:{h}:(ow-iw)/2:(oh-ih)/2");
     } else {
         // The blur works on a 1/8 size copy: cheap, and blurrier.
@@ -234,7 +294,7 @@ fn video_filter(info: &Info, (w, h): (u32, u32)) -> String {
     f + &format!(",setsar=1,format={PIX_FMT}")
 }
 
-fn strings<const N: usize>(a: [&str; N]) -> Vec<String> {
+pub(crate) fn strings<const N: usize>(a: [&str; N]) -> Vec<String> {
     a.map(String::from).into()
 }
 
@@ -248,7 +308,7 @@ fn strings<const N: usize>(a: [&str; N]) -> Vec<String> {
 /// The stream comes from the network, so the decoder is kept small: only the
 /// native H.264 decoder, one thread, and no single allocation above 64 MiB
 /// (a 4K frame needs ~12 MiB).
-fn decoder_args(info: &Info, size: (u32, u32)) -> Vec<String> {
+fn decoder_args(info: &Info, size: (u32, u32), plain_bars: bool) -> Vec<String> {
     let mut a = strings([
         "-hide_banner",
         "-loglevel",
@@ -270,7 +330,7 @@ fn decoder_args(info: &Info, size: (u32, u32)) -> Vec<String> {
     ]);
     a.push(info.fps.max(1).to_string());
     a.extend(strings(["-i", "-", "-vf"]));
-    a.push(video_filter(info, size));
+    a.push(video_filter(info, size, plain_bars));
     a.extend(strings([
         "-fps_mode",
         "passthrough",
@@ -634,20 +694,40 @@ fn describe(status: Option<ExitStatus>) -> String {
     }
 }
 
+type Channel = secure::Channel<Conn, Conn>;
+
+/// Connect, authenticate and say hello.
+fn open(cfg: &Config, v2: bool) -> Result<(Channel, Hello), HelloError> {
+    let conn = transport::connect(&cfg.transport, cfg.port)?;
+    conn.set_timeout(Duration::from_secs(5))?;
+    let (mut ch, _) = secure::open(conn.try_clone()?, conn, cfg.token.as_deref())?;
+    hello(&mut ch, v2).map(|h| (ch, h))
+}
+
+/// The background for this connection, if the phone sent a picture and it
+/// can be used; problems are logged and the stream goes on without it.
+fn compositor(picture: Option<Vec<u8>>, size: (u32, u32)) -> Option<Compositor> {
+    let jpeg = picture?;
+    let made = background::decode_picture(&jpeg, size).and_then(|p| Compositor::new(p, size));
+    match made {
+        Ok(c) => Some(c),
+        Err(e) => {
+            log!("camera: no virtual background: {e}");
+            None
+        }
+    }
+}
+
 /// Connect and stream until the phone goes away, feeding decoded frames to
 /// the writer. `Err` is fatal (ffmpeg missing).
 fn session(cfg: &Config, procs: &Procs, feed: &Feed, live: &Live) -> Result<Outcome, String> {
-    let conn = match transport::connect(&cfg.transport, cfg.port) {
-        Ok(c) => c,
-        Err(e) => return failed(e),
+    // An app from before PBV2 closes without a reply: ask again with PBV1.
+    let opened = match open(cfg, true) {
+        Err(HelloError::NoReply(_)) => open(cfg, false),
+        r => r,
     };
-    let open = || {
-        conn.set_timeout(Duration::from_secs(5))?;
-        let (mut ch, _) = secure::open(conn.try_clone()?, conn, cfg.token.as_deref())?;
-        hello(&mut ch).map(|h| (ch, h))
-    };
-    let (mut ch, info) = match open() {
-        Ok((ch, Hello::Ready(info))) => (ch, info),
+    let (mut ch, info, picture) = match opened {
+        Ok((ch, Hello::Ready(info, picture))) => (ch, info, picture),
         Ok((_, Hello::Refused { status, msg })) => {
             let why = match status {
                 1 => "camera sharing is disabled on the phone",
@@ -661,23 +741,29 @@ fn session(cfg: &Config, procs: &Procs, feed: &Feed, live: &Live) -> Result<Outc
             };
             return failed(format!("{why} (status {status}){detail}"));
         }
-        Err(e) => return failed(e),
+        Err(e) => return failed(io::Error::from(e)),
     };
     if info.codec != CODEC_H264 {
         return failed(format!("unsupported video codec {}", info.codec));
     }
+    let comp = compositor(picture, cfg.size);
     let (w, h) = cfg.size;
     log!(
-        "camera: streaming {}x{} at {} fps, rotation {}°, to {} as {w}x{h}",
+        "camera: streaming {}x{} at {} fps, rotation {}°, to {} as {w}x{h}{}",
         info.width,
         info.height,
         info.fps,
         info.rotation,
-        cfg.device.display()
+        cfg.device.display(),
+        if comp.is_some() {
+            ", virtual background"
+        } else {
+            ""
+        }
     );
 
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(decoder_args(&info, cfg.size))
+    cmd.args(decoder_args(&info, cfg.size, comp.is_some()))
         .stdout(Stdio::piped());
     let (mut stdin, stdout) = match procs.spawn(&procs.decoder, &mut cmd) {
         Ok(p) => p,
@@ -689,12 +775,20 @@ fn session(cfg: &Config, procs: &Procs, feed: &Feed, live: &Live) -> Result<Outc
     let mut stdout = stdout.expect("piped stdout");
 
     live.camera(true);
+    let comp = comp.as_ref();
     let (msg, frames) = thread::scope(|s| {
-        // Decoded frames -> writer, until the decoder exits.
+        if let Some(c) = comp {
+            s.spawn(|| c.segment());
+        }
+        // Decoded frames -> (background ->) writer, until the decoder exits.
         let reader = s.spawn(move || {
+            let mut applier = comp.map(Compositor::applier);
             let mut buf = vec![0u8; frame_size(cfg.size)];
             let mut n = 0u64;
             while stdout.read_exact(&mut buf).is_ok() {
+                if let Some(a) = &mut applier {
+                    a.apply(&mut buf);
+                }
                 feed.push(&mut buf);
                 buf.resize(frame_size(cfg.size), 0);
                 n += 1;
@@ -722,7 +816,11 @@ fn session(cfg: &Config, procs: &Procs, feed: &Feed, live: &Live) -> Result<Outc
             }
             _ => msg,
         };
-        (msg, reader.join().unwrap_or(0))
+        let frames = reader.join().unwrap_or(0);
+        if let Some(c) = comp {
+            c.stop();
+        }
+        (msg, frames)
     });
     live.camera(false);
     Ok(Outcome {
@@ -794,7 +892,11 @@ mod tests {
     use super::*;
 
     fn reply(status: u8) -> Vec<u8> {
-        let mut r = b"PBV1".to_vec();
+        reply_as(b"PBV1", status)
+    }
+
+    fn reply_as(magic: &[u8; 4], status: u8) -> Vec<u8> {
+        let mut r = magic.to_vec();
         r.extend([status, 1, 0x05, 0x00, 0x02, 0xd0, 0x00, 90, 30]);
         r
     }
@@ -827,18 +929,72 @@ mod tests {
     #[test]
     fn hello_ready() {
         let mut f = fake(reply(0));
-        let h = hello(&mut f).unwrap();
+        let h = hello(&mut f, false).unwrap();
         assert_eq!(f.sent, b"PBV1");
         assert_eq!(
             h,
-            Hello::Ready(Info {
-                codec: 1,
-                width: 1280,
-                height: 720,
-                rotation: 90,
-                fps: 30
-            })
+            Hello::Ready(
+                Info {
+                    codec: 1,
+                    width: 1280,
+                    height: 720,
+                    rotation: 90,
+                    fps: 30
+                },
+                None
+            )
         );
+    }
+
+    #[test]
+    fn hello_v2_with_and_without_picture() {
+        let mut r = reply_as(b"PBV2", 0);
+        r.extend(3u32.to_be_bytes());
+        r.extend([0xff, 0xd8, 0xff]);
+        let mut f = fake(r);
+        let h = hello(&mut f, true).unwrap();
+        assert_eq!(f.sent, b"PBV2");
+        assert!(matches!(h, Hello::Ready(_, Some(ref p)) if p == &[0xff, 0xd8, 0xff]));
+
+        let mut r = reply_as(b"PBV2", 0);
+        r.extend(0u32.to_be_bytes());
+        assert!(matches!(
+            hello(&mut fake(r), true).unwrap(),
+            Hello::Ready(_, None)
+        ));
+
+        // Refusals have no picture field.
+        let mut r = reply_as(b"PBV2", 1);
+        r.extend([0, 3]);
+        r.extend(b"off");
+        assert!(matches!(
+            hello(&mut fake(r), true).unwrap(),
+            Hello::Refused { status: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn hello_v2_limits_and_fallback() {
+        let mut r = reply_as(b"PBV2", 0);
+        r.extend(((MAX_PICTURE + 1) as u32).to_be_bytes());
+        assert!(matches!(
+            hello(&mut fake(r), true),
+            Err(HelloError::Other(_))
+        ));
+        // A PBV1 reply to PBV2 is not accepted.
+        assert!(hello(&mut fake(reply(0)), true).is_err());
+        // An old app closes without a reply: the caller retries with PBV1.
+        assert!(matches!(
+            hello(&mut fake(Vec::new()), true),
+            Err(HelloError::NoReply(_))
+        ));
+        // A truncated picture is not "no reply".
+        let mut r = reply_as(b"PBV2", 0);
+        r.extend(9u32.to_be_bytes());
+        assert!(matches!(
+            hello(&mut fake(r), true),
+            Err(HelloError::Other(_))
+        ));
     }
 
     #[test]
@@ -846,7 +1002,7 @@ mod tests {
         let mut r = reply(1);
         r.extend([0, 3]);
         r.extend(b"off");
-        let h = hello(&mut fake(r)).unwrap();
+        let h = hello(&mut fake(r), false).unwrap();
         assert_eq!(
             h,
             Hello::Refused {
@@ -855,7 +1011,7 @@ mod tests {
             }
         );
         // Missing message is tolerated.
-        let h = hello(&mut fake(reply(2))).unwrap();
+        let h = hello(&mut fake(reply(2)), false).unwrap();
         assert!(matches!(h, Hello::Refused { status: 2, .. }));
     }
 
@@ -863,8 +1019,8 @@ mod tests {
     fn hello_rejects_bad_magic_and_short_reply() {
         let mut r = reply(0);
         r[0] = b'X';
-        assert!(hello(&mut fake(r)).is_err());
-        let e = hello(&mut fake(b"PBV1".to_vec())).unwrap_err();
+        assert!(hello(&mut fake(r), false).is_err());
+        let e = io::Error::from(hello(&mut fake(b"PBV1".to_vec()), false).unwrap_err());
         assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
     }
 
@@ -914,7 +1070,7 @@ mod tests {
 
     #[test]
     fn decoder_rotates_and_fits() {
-        let a = decoder_args(&info(1280, 720, 90), (1280, 720));
+        let a = decoder_args(&info(1280, 720, 90), (1280, 720), false);
         let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
         // Portrait into landscape: blurred fill behind the fitted picture.
         assert!(vf.starts_with("transpose=1,split[a][b];"), "{vf}");
@@ -925,14 +1081,20 @@ mod tests {
         assert_eq!(a[a.len() - 3..], ["-f", "rawvideo", "-"]);
 
         // Same aspect: scale (and pad, should the phone's numbers be off).
-        let vf = video_filter(&info(1920, 1080, 0), (1280, 720));
+        let vf = video_filter(&info(1920, 1080, 0), (1280, 720), false);
         assert!(vf.starts_with("scale=1280:720:force_original"), "{vf}");
         assert!(
             vf.contains("pad=1280:720") && !vf.contains("boxblur"),
             "{vf}"
         );
-        let vf = video_filter(&info(720, 1280, 270), (1280, 720));
+        let vf = video_filter(&info(720, 1280, 270), (1280, 720), false);
         assert!(vf.starts_with("transpose=2,scale="), "{vf}");
+        // Virtual background: black bars, replaced by the picture later.
+        let vf = video_filter(&info(1280, 720, 90), (1280, 720), true);
+        assert!(
+            vf.contains("pad=1280:720") && !vf.contains("boxblur"),
+            "{vf}"
+        );
         assert_eq!(rotate_filter(180), Some("hflip,vflip"));
         assert_eq!(rotate_filter(0), None);
     }

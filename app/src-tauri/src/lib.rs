@@ -77,6 +77,10 @@ pub struct CameraConfig {
     /// "landscape" or "portrait": how the phone is held, for the rotation
     /// the PC applies.
     pub orientation: String,
+    /// Send the virtual background picture, so the PC puts it behind the
+    /// person.
+    #[serde(default)]
+    pub background: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -320,6 +324,24 @@ async fn set_preview_rect(app: AppHandle, rect: PreviewRect) -> Result<(), Strin
     Ok(())
 }
 
+/// Whether a virtual background picture has been chosen.
+#[tauri::command]
+async fn background_status(app: AppHandle) -> Result<bool, String> {
+    app.state::<Platform>().background_chosen()
+}
+
+/// Choose the virtual background picture; false if cancelled. Takes effect
+/// on the next camera (re)start.
+#[tauri::command]
+async fn pick_background(app: AppHandle) -> Result<bool, String> {
+    app.state::<Platform>().pick_background()
+}
+
+#[tauri::command]
+async fn clear_background(app: AppHandle) -> Result<(), String> {
+    app.state::<Platform>().clear_background()
+}
+
 /// The app's system settings page, to grant a refused permission.
 #[tauri::command]
 async fn open_app_settings(app: AppHandle) -> Result<(), String> {
@@ -434,6 +456,9 @@ pub fn run() {
             set_camera,
             set_preview_rect,
             open_app_settings,
+            background_status,
+            pick_background,
+            clear_background,
             get_token,
             reset_token,
             status

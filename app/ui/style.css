@@ -616,6 +616,9 @@ code,
 .text-btn.strong {
   font-weight: 600;
 }
+.row-btn {
+  margin-right: -10px;
+}
 .text-btn:disabled {
   color: var(--muted);
   opacity: 0.6;

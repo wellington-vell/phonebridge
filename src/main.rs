@@ -33,6 +33,7 @@ use std::time::Duration;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use signal_hook::iterator::Signals;
 
+mod background;
 mod bluetooth;
 mod control;
 mod opus;

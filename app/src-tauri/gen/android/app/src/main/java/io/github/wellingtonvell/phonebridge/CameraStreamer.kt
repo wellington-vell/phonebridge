@@ -52,9 +52,11 @@ import kotlin.math.abs
  *
  *   (PBA1 handshake, then everything below in encrypted records; see
  *    docs/secure-channel.md and [SecureChannel])
- *   PC -> "PBV1"
- *   phone -> "PBV1" status u8 | codec u8 | width u16 | height u16 | rotation u16 | fps u8
+ *   PC -> "PBV2" (or "PBV1")
+ *   phone -> the same magic, status u8 | codec u8 | width u16 | height u16 | rotation u16 | fps u8
  *            (status != 0: then [msg_len u16][UTF-8 message] and close)
+ *            PBV2, status 0: then [bg_len u32][JPEG], the virtual background
+ *            picture the PC puts behind the person (bg_len 0: none)
  *   phone -> repeated [len u32][pts_us u64][flags u8][H.264 Annex-B, len bytes]
  *            flags: bit0 keyframe, bit1 codec config (SPS/PPS)
  *
@@ -83,11 +85,14 @@ class CameraStreamer(
         val token: String = "",
         /** Also accept plaintext `PBV1` clients (no pairing code). */
         val allowUnauthenticated: Boolean = false,
+        /** Virtual background picture (JPEG) for PBV2 clients; null: off. */
+        val background: ByteArray? = null,
     )
 
     companion object {
         private const val TAG = "phonebridge"
         private val MAGIC = "PBV1".toByteArray()
+        private val MAGIC_V2 = "PBV2".toByteArray()
         private const val STATUS_OK = 0
         private const val STATUS_UNAVAILABLE = 2
         private const val CODEC_H264 = 1
@@ -284,8 +289,15 @@ class CameraStreamer(
         if (s == null) done() else s.dropPreviewSurface(done)
     }
 
-    /** Streams of a connection that passed [handshake]. */
-    private class Hello(val input: InputStream, val output: OutputStream, val secure: Boolean)
+    /** Streams of a connection that passed [handshake]; [magic] is the version it asked for. */
+    private class Hello(
+        val input: InputStream,
+        val output: OutputStream,
+        val secure: Boolean,
+        val magic: ByteArray,
+    )
+
+    private fun isHello(magic: ByteArray) = magic.contentEquals(MAGIC) || magic.contentEquals(MAGIC_V2)
 
     /**
      * PBA1 (if the client starts with it) and the `PBV1` hello. Null:
@@ -307,11 +319,11 @@ class CameraStreamer(
                     return null
                 }
                 val magic = ByteArray(4).also { DataInputStream(ch.input).readFully(it) }
-                if (!magic.contentEquals(MAGIC)) return null
-                Hello(ch.input, ch.output, true)
+                if (!isHello(magic)) return null
+                Hello(ch.input, ch.output, true, magic)
             }
-            config.allowUnauthenticated && first.contentEquals(MAGIC) ->
-                Hello(rawIn, BufferedOutputStream(rawOut, 64 * 1024), false)
+            config.allowUnauthenticated && isHello(first) ->
+                Hello(rawIn, BufferedOutputStream(rawOut, 64 * 1024), false, first)
             else -> null
         }
     }
@@ -349,17 +361,22 @@ class CameraStreamer(
             val s = try {
                 ensureSession() ?: throw IOException("camera sharing is off")
             } catch (e: Exception) {
-                sendError(out, STATUS_UNAVAILABLE, e.message ?: e.javaClass.simpleName)
+                sendError(out, hello.magic, STATUS_UNAVAILABLE, e.message ?: e.javaClass.simpleName)
                 return
             }
             synchronized(lock) { if (client !== c) return }
-            out.write(MAGIC)
+            out.write(hello.magic)
             out.writeByte(STATUS_OK)
             out.writeByte(CODEC_H264)
             out.writeShort(s.size.width)
             out.writeShort(s.size.height)
             out.writeShort(s.rotation)
             out.writeByte(s.fps)
+            if (hello.magic.contentEquals(MAGIC_V2)) {
+                val bg = config.background ?: ByteArray(0)
+                out.writeInt(bg.size)
+                out.write(bg)
+            }
             out.flush()
             c.attached = true
             onStreaming(true)
@@ -391,10 +408,11 @@ class CameraStreamer(
         }
     }
 
-    private fun sendError(out: DataOutputStream, status: Int, msg: String) {
+    /** Same layout for PBV1 and PBV2: refusals carry no picture. */
+    private fun sendError(out: DataOutputStream, magic: ByteArray, status: Int, msg: String) {
         runCatching {
             val bytes = msg.toByteArray(Charsets.UTF_8)
-            out.write(MAGIC)
+            out.write(magic)
             out.writeByte(status)
             out.write(ByteArray(8))
             out.writeShort(bytes.size)

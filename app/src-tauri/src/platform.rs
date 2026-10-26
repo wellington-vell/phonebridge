@@ -112,6 +112,7 @@ impl Platform {
             "height": cam.height,
             "fps": cam.fps,
             "orientation": cam.orientation,
+            "background": cam.background,
         });
         self.call("startCamera", args).map(drop)
     }
@@ -138,6 +139,28 @@ impl Platform {
     pub fn open_app_settings(&self) -> Result<(), String> {
         self.call("openAppSettings", json!({})).map(drop)
     }
+
+    /// Whether a virtual background picture is stored.
+    pub fn background_chosen(&self) -> Result<bool, String> {
+        self.call("backgroundStatus", json!({}))
+            .map(|v| flag(&v, "chosen"))
+    }
+
+    /// Let the user choose the virtual background picture (system picker);
+    /// false if they cancelled.
+    pub fn pick_background(&self) -> Result<bool, String> {
+        self.call("pickBackground", json!({}))
+            .map(|v| flag(&v, "picked"))
+    }
+
+    pub fn clear_background(&self) -> Result<(), String> {
+        self.call("clearBackground", json!({})).map(drop)
+    }
+}
+
+/// A boolean field of a plugin reply; false if missing (and on desktop).
+fn flag(reply: &Value, key: &str) -> bool {
+    reply.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
 /// {"token": "ABCDE-..."} from getToken / resetToken; Null on desktop.
@@ -163,6 +186,13 @@ fn granted(states: &Value, alias: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flags() {
+        assert!(flag(&json!({ "picked": true }), "picked"));
+        assert!(!flag(&json!({ "picked": false }), "picked"));
+        assert!(!flag(&Value::Null, "chosen"));
+    }
 
     #[test]
     fn permission_states() {

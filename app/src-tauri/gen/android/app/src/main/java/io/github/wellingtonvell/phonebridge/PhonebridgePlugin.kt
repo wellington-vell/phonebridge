@@ -6,11 +6,16 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.WindowManager
+import androidx.activity.result.ActivityResult
 import androidx.appcompat.app.AppCompatActivity
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
@@ -18,6 +23,9 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.io.File
+import kotlin.concurrent.thread
+import kotlin.math.min
 
 @InvokeArg
 class KeepScreenOnArgs {
@@ -50,6 +58,8 @@ class CameraArgs {
     var token: String = ""
     /** Also accept clients without the pairing code (plaintext PBV1). */
     var allowUnauthenticated: Boolean = false
+    /** Send the virtual background picture (from pickBackground), if there is one. */
+    var background: Boolean = false
 }
 
 @InvokeArg
@@ -193,6 +203,7 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
             portrait = args.orientation == "portrait",
             token = SecureChannel.canonicalCode(args.token),
             allowUnauthenticated = args.allowUnauthenticated,
+            background = if (args.background) runCatching { backgroundFile.readBytes() }.getOrNull() else null,
         )
         try {
             var streamer: CameraStreamer? = null
@@ -250,6 +261,71 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun resetToken(invoke: Invoke) {
         resolveToken(invoke, storeNewToken())
+    }
+
+    /** The virtual background picture, a JPEG the PC puts behind the person. */
+    private val backgroundFile get() = File(activity.filesDir, "background.jpg")
+
+    /** Whether a virtual background picture has been chosen. */
+    @Command
+    fun backgroundStatus(invoke: Invoke) {
+        invoke.resolve(JSObject().apply { put("chosen", backgroundFile.isFile) })
+    }
+
+    /** Let the user choose the virtual background picture; resolves `{ picked }` (false: cancelled). */
+    @Command
+    fun pickBackground(invoke: Invoke) {
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*")
+        } else {
+            Intent(Intent.ACTION_GET_CONTENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        try {
+            startActivityForResult(invoke, intent, "backgroundPicked")
+        } catch (e: Exception) {
+            invoke.reject("cannot open the picture picker: ${e.message}")
+        }
+    }
+
+    @ActivityCallback
+    fun backgroundPicked(invoke: Invoke, result: ActivityResult) {
+        val uri = result.data?.data
+        if (result.resultCode != Activity.RESULT_OK || uri == null) {
+            invoke.resolve(JSObject().apply { put("picked", false) })
+            return
+        }
+        thread(name = "phonebridge-background") {
+            try {
+                saveBackground(uri)
+                invoke.resolve(JSObject().apply { put("picked", true) })
+            } catch (e: Exception) {
+                invoke.reject("cannot use this picture: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
+     * Decode [uri] upright (ImageDecoder applies the EXIF orientation), fit it
+     * within 1920x1080 and store it as a JPEG the PC accepts (well under 4 MiB).
+     */
+    private fun saveBackground(uri: Uri) {
+        val source = ImageDecoder.createSource(activity.contentResolver, uri)
+        val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+            val (w, h) = info.size.width to info.size.height
+            val scale = min(1.0, min(1920.0 / maxOf(w, h), 1080.0 / minOf(w, h)))
+            decoder.setTargetSize(maxOf(1, (w * scale).toInt()), maxOf(1, (h * scale).toInt()))
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+        val tmp = File(activity.filesDir, "background.jpg.tmp")
+        tmp.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+        bitmap.recycle()
+        if (!tmp.renameTo(backgroundFile)) throw java.io.IOException("cannot store the picture")
+    }
+
+    @Command
+    fun clearBackground(invoke: Invoke) {
+        backgroundFile.delete()
+        invoke.resolve()
     }
 
     /** Where the page's preview placeholder is, in window pixels. */

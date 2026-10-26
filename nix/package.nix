@@ -21,6 +21,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
+      ../models
       ../assets/phonebridge.png
       ../assets/phonebridge.svg
       ../noctalia
