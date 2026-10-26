@@ -3,10 +3,13 @@
 //!
 //! The phone sends the picture (JPEG) in its video hello; ffmpeg turns it into
 //! one webcam-size YUYV frame. A segmentation thread runs MediaPipe Selfie
-//! Segmentation (models/, Apache-2.0) with tract on a 256x144 copy of the
-//! newest frame and publishes a person mask; every frame is blended with the
-//! latest mask, so a slow inference never holds the stream back. Until the
-//! first mask the webcam shows only the picture.
+//! Segmentation (models/, Apache-2.0) with tract on the phone's picture area
+//! of the newest frame (the landscape model for landscape, the square one for
+//! portrait, so the person gets all of the model's resolution), refines the
+//! coarse result with a guided filter so its edges follow the real ones in
+//! the image, and publishes a half-resolution mask. Every frame is blended
+//! with the latest mask, so a slow inference never holds the stream back.
+//! Until the first mask the webcam shows only the picture.
 
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -18,14 +21,18 @@ use tract_onnx::prelude::*;
 use crate::log;
 use crate::video::{PIX_FMT, frame_size, strings};
 
-const MODEL: &[u8] = include_bytes!("../models/selfie_segmentation_landscape.onnx");
-/// Model input and mask size.
-const MW: usize = 256;
-const MH: usize = 144;
-/// Weight of the new mask against the previous one (less flicker).
+/// 256x144, for landscape pictures.
+const LANDSCAPE: &[u8] = include_bytes!("../models/selfie_segmentation_landscape.onnx");
+/// 256x256, for portrait ones.
+const GENERAL: &[u8] = include_bytes!("../models/selfie_segmentation.onnx");
+/// Weight of the new inference against the running one (less flicker).
 const EMA_NEW: f32 = 0.6;
-/// Mask probabilities between these fade from background to person.
-const EDGE: (f32, f32) = (0.3, 0.7);
+/// Guided filter window radius, in mask pixels (half the webcam size).
+const RADIUS: usize = 4;
+/// Guided filter regularization: lower follows image edges more closely.
+const EPS: f32 = 0.002;
+/// Refined probabilities between these fade from background to person.
+const EDGE: (f32, f32) = (0.25, 0.75);
 
 // ------------------------------------------------------------------ picture
 /// One-shot ffmpeg: the phone's JPEG on stdin, cropped to fill the webcam
@@ -92,52 +99,96 @@ pub fn decode_picture(jpeg: &[u8], size: (u32, u32)) -> Result<Vec<u8>, String> 
 }
 
 // -------------------------------------------------------------------- model
-type Model = Arc<TypedRunnableModel>;
-
-/// Loaded on first use, then shared by every session.
-fn model() -> Result<Model, String> {
-    static MODEL_CELL: OnceLock<Result<Model, String>> = OnceLock::new();
-    MODEL_CELL
-        .get_or_init(|| {
-            (|| -> TractResult<Model> {
-                // The file's shape hints use a symbolic batch size; pin it to 1.
-                tract_onnx::onnx()
-                    .with_ignore_output_shapes(true)
-                    .with_ignore_value_info(true)
-                    .model_for_read(&mut io::Cursor::new(MODEL))?
-                    .with_input_fact(0, f32::fact([1, 3, MH, MW]).into())?
-                    .into_optimized()?
-                    .into_runnable()
-            })()
-            .map_err(|e| format!("segmentation model: {e}"))
-        })
-        .clone()
+/// A segmentation model and its input / output size.
+struct Net {
+    plan: Arc<TypedRunnableModel>,
+    w: usize,
+    h: usize,
 }
 
-/// Person probability per pixel of a 256x144 RGB input (NCHW, 0..1).
-fn infer(model: &Model, input: Vec<f32>) -> TractResult<Vec<f32>> {
-    let t = Tensor::from_shape(&[1, 3, MH, MW], &input)?;
-    let out = model.run(tvec!(t.into()))?;
-    let m = out[0].to_plain_array_view::<f32>()?;
-    if m.len() != MW * MH {
-        return Err(TractError::msg(format!(
-            "unexpected mask shape {:?}",
-            m.shape()
-        )));
+fn load(bytes: &[u8], w: usize, h: usize) -> Result<Net, String> {
+    (|| -> TractResult<Net> {
+        // The files' shape hints use a symbolic batch size; pin it to 1.
+        let plan = tract_onnx::onnx()
+            .with_ignore_output_shapes(true)
+            .with_ignore_value_info(true)
+            .model_for_read(&mut io::Cursor::new(bytes))?
+            .with_input_fact(0, f32::fact([1, 3, h, w]).into())?
+            .into_optimized()?
+            .into_runnable()?;
+        Ok(Net { plan, w, h })
+    })()
+    .map_err(|e| format!("segmentation model: {e}"))
+}
+
+/// The model for a picture area of this shape; loaded on first use, then
+/// shared by every session.
+fn net(landscape: bool) -> Result<&'static Net, String> {
+    static NETS: [OnceLock<Result<Net, String>>; 2] = [OnceLock::new(), OnceLock::new()];
+    let r = if landscape {
+        NETS[0].get_or_init(|| load(LANDSCAPE, 256, 144))
+    } else {
+        NETS[1].get_or_init(|| load(GENERAL, 256, 256))
+    };
+    r.as_ref().map_err(Clone::clone)
+}
+
+impl Net {
+    /// Person probability per pixel of an RGB input (NCHW, 0..1).
+    fn infer(&self, input: Vec<f32>) -> TractResult<Vec<f32>> {
+        let t = Tensor::from_shape(&[1, 3, self.h, self.w], &input)?;
+        let out = self.plan.run(tvec!(t.into()))?;
+        let m = out[0].to_plain_array_view::<f32>()?;
+        if m.len() != self.w * self.h {
+            return Err(TractError::msg(format!(
+                "unexpected mask shape {:?}",
+                m.shape()
+            )));
+        }
+        Ok(m.iter().copied().collect())
     }
-    Ok(m.iter().copied().collect())
 }
 
 // ------------------------------------------------------------------ pixels
-/// The model's input from a YUYV frame: nearest sample per cell, BT.601
-/// limited range (what ffmpeg's scale writes) to RGB, NCHW.
-fn model_input(yuyv: &[u8], (w, h): (u32, u32)) -> Vec<f32> {
-    let (w, h) = (w as usize, h as usize);
-    let mut out = vec![0f32; 3 * MW * MH];
-    for my in 0..MH {
-        let sy = (2 * my + 1) * h / (2 * MH);
-        for mx in 0..MW {
-            let sx = (2 * mx + 1) * w / (2 * MW);
+/// Where the phone's picture is in the webcam frame; the rest is black bars.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+impl Rect {
+    pub fn full((w, h): (u32, u32)) -> Self {
+        Rect {
+            x: 0,
+            y: 0,
+            w: w as usize,
+            h: h as usize,
+        }
+    }
+
+    /// The same area in a frame scaled down by `div`.
+    fn scaled(self, div: usize) -> Self {
+        Rect {
+            x: self.x / div,
+            y: self.y / div,
+            w: (self.w / div).max(1),
+            h: (self.h / div).max(1),
+        }
+    }
+}
+
+/// The model's input from the picture area of a YUYV frame (`w` wide):
+/// stretched to the model size (as MediaPipe does), nearest sample per cell,
+/// BT.601 limited range (what ffmpeg's scale writes) to RGB, NCHW.
+fn model_input(yuyv: &[u8], w: usize, r: Rect, (nw, nh): (usize, usize)) -> Vec<f32> {
+    let mut out = vec![0f32; 3 * nw * nh];
+    for my in 0..nh {
+        let sy = r.y + (2 * my + 1) * r.h / (2 * nh);
+        for mx in 0..nw {
+            let sx = r.x + (2 * mx + 1) * r.w / (2 * nw);
             let pair = (sy * w + (sx & !1)) * 2;
             let y = f32::from(yuyv[(sy * w + sx) * 2]) - 16.0;
             let u = f32::from(yuyv[pair + 1]) - 128.0;
@@ -148,16 +199,34 @@ fn model_input(yuyv: &[u8], (w, h): (u32, u32)) -> Vec<f32> {
                 1.164 * y + 2.017 * u,
             ];
             for (c, val) in rgb.into_iter().enumerate() {
-                out[(c * MH + my) * MW + mx] = (val / 255.0).clamp(0.0, 1.0);
+                out[(c * nh + my) * nw + mx] = (val / 255.0).clamp(0.0, 1.0);
             }
         }
     }
     out
 }
 
-/// Fold a new inference into the running mask and turn it into 0..255
-/// weights with a soft edge.
-fn update_mask(ema: &mut Vec<f32>, probs: &[f32]) -> Vec<u8> {
+/// Luma at half size (2x2 averages), 0..1: the guided filter's guide.
+fn half_luma(yuyv: &[u8], (w, h): (usize, usize)) -> Vec<f32> {
+    let (gw, gh) = (w / 2, h / 2);
+    let mut out = Vec::with_capacity(gw * gh);
+    for gy in 0..gh {
+        let (a, b) = (
+            &yuyv[2 * gy * w * 2..][..w * 2],
+            &yuyv[(2 * gy + 1) * w * 2..][..w * 2],
+        );
+        for gx in 0..gw {
+            // Two pixels per 4 bytes: Y at 0 and 2.
+            let i = gx * 4;
+            let sum = u32::from(a[i]) + u32::from(a[i + 2]) + u32::from(b[i]) + u32::from(b[i + 2]);
+            out.push(sum as f32 / (4.0 * 255.0));
+        }
+    }
+    out
+}
+
+/// Fold a new inference into the running one.
+fn smooth(ema: &mut Vec<f32>, probs: &[f32]) {
     if ema.len() != probs.len() {
         ema.clear();
         ema.extend_from_slice(probs);
@@ -166,12 +235,6 @@ fn update_mask(ema: &mut Vec<f32>, probs: &[f32]) -> Vec<u8> {
             *e += (p - *e) * EMA_NEW;
         }
     }
-    ema.iter()
-        .map(|&p| {
-            let t = ((p - EDGE.0) / (EDGE.1 - EDGE.0)).clamp(0.0, 1.0);
-            (t * t * (3.0 - 2.0 * t) * 255.0).round() as u8
-        })
-        .collect()
 }
 
 /// Bilinear sampling positions from `dst` cells onto `src` cells: for each
@@ -188,9 +251,101 @@ fn taps(dst: usize, src: usize) -> Vec<(usize, usize, u32)> {
         .collect()
 }
 
-/// Upsamples the 256x144 mask to the webcam size and blends the frame over
-/// the picture, in place.
+/// The `(sw, sh)` probabilities stretched bilinearly over `r` of a `(w, h)`
+/// map; 0 outside it.
+fn upsample(src: &[f32], (sw, sh): (usize, usize), (w, h): (usize, usize), r: Rect) -> Vec<f32> {
+    let mut out = vec![0f32; w * h];
+    let cols = taps(r.w, sw);
+    for (y, &(r0, r1, wy)) in taps(r.h, sh).iter().enumerate() {
+        let wy = wy as f32 / 256.0;
+        let row = &mut out[(r.y + y) * w + r.x..][..r.w];
+        for (o, &(c0, c1, wx)) in row.iter_mut().zip(&cols) {
+            let wx = wx as f32 / 256.0;
+            let lerp = |row: usize| src[row * sw + c0] * (1.0 - wx) + src[row * sw + c1] * wx;
+            *o = lerp(r0) * (1.0 - wy) + lerp(r1) * wy;
+        }
+    }
+    out
+}
+
+/// Mean over a (2r+1)² window, clamped at the borders (separable running
+/// sums; the vertical pass adds and drops whole rows, for the cache).
+fn box_mean(src: &[f32], (w, h): (usize, usize), r: usize) -> Vec<f32> {
+    let mut tmp = vec![0f32; w * h];
+    for (row, out) in src.chunks_exact(w).zip(tmp.chunks_exact_mut(w)) {
+        let mut sum: f32 = row[..=r.min(w - 1)].iter().sum();
+        for x in 0..w {
+            let (lo, hi) = (x.saturating_sub(r), (x + r).min(w - 1));
+            out[x] = sum / (hi - lo + 1) as f32;
+            if x + r + 1 < w {
+                sum += row[x + r + 1];
+            }
+            if x >= r {
+                sum -= row[x - r];
+            }
+        }
+    }
+    let mut out = vec![0f32; w * h];
+    let mut sums = vec![0f32; w];
+    for row in tmp.chunks_exact(w).take(r + 1) {
+        sums.iter_mut().zip(row).for_each(|(s, v)| *s += v);
+    }
+    for y in 0..h {
+        let (lo, hi) = (y.saturating_sub(r), (y + r).min(h - 1));
+        let n = (hi - lo + 1) as f32;
+        out[y * w..][..w]
+            .iter_mut()
+            .zip(&sums)
+            .for_each(|(o, s)| *o = s / n);
+        if y + r + 1 < h {
+            let add = &tmp[(y + r + 1) * w..][..w];
+            sums.iter_mut().zip(add).for_each(|(s, v)| *s += v);
+        }
+        if y >= r {
+            let drop = &tmp[(y - r) * w..][..w];
+            sums.iter_mut().zip(drop).for_each(|(s, v)| *s -= v);
+        }
+    }
+    out
+}
+
+/// Guided filter (He et al.): `p` made locally linear in the guide `i`, so
+/// the mask's edges snap to the image's instead of the model's coarse grid.
+fn guided(i: &[f32], p: &[f32], size: (usize, usize)) -> Vec<f32> {
+    let mean = |v: &[f32]| box_mean(v, size, RADIUS);
+    let (mi, mp) = (mean(i), mean(p));
+    let ip: Vec<f32> = i.iter().zip(p).map(|(a, b)| a * b).collect();
+    let ii: Vec<f32> = i.iter().map(|a| a * a).collect();
+    let (mip, mii) = (mean(&ip), mean(&ii));
+    let mut a = vec![0f32; i.len()];
+    let mut b = vec![0f32; i.len()];
+    for k in 0..i.len() {
+        let var = mii[k] - mi[k] * mi[k];
+        let cov = mip[k] - mi[k] * mp[k];
+        a[k] = cov / (var + EPS);
+        b[k] = mp[k] - a[k] * mi[k];
+    }
+    let (ma, mb) = (mean(&a), mean(&b));
+    i.iter()
+        .zip(ma.iter().zip(&mb))
+        .map(|(g, (a, b))| a * g + b)
+        .collect()
+}
+
+/// Refined probabilities to 0..255 weights with a soft edge.
+fn weights(q: &[f32]) -> Vec<u8> {
+    q.iter()
+        .map(|&p| {
+            let t = ((p - EDGE.0) / (EDGE.1 - EDGE.0)).clamp(0.0, 1.0);
+            (t * t * (3.0 - 2.0 * t) * 255.0).round() as u8
+        })
+        .collect()
+}
+
+/// Upsamples the mask to the webcam size and blends the frame over the
+/// picture, in place.
 struct Blender {
+    mw: usize,
     cols: Vec<(usize, usize, u32)>,
     rows: Vec<(usize, usize, u32)>,
     /// One upsampled mask row.
@@ -198,18 +353,19 @@ struct Blender {
 }
 
 impl Blender {
-    fn new((w, h): (u32, u32)) -> Self {
+    fn new((w, h): (u32, u32), (mw, mh): (usize, usize)) -> Self {
         Blender {
-            cols: taps(w as usize, MW),
-            rows: taps(h as usize, MH),
+            mw,
+            cols: taps(w as usize, mw),
+            rows: taps(h as usize, mh),
             line: vec![0; w as usize],
         }
     }
 
     fn blend(&mut self, frame: &mut [u8], picture: &[u8], mask: &[u8]) {
-        let w = self.cols.len();
+        let (w, mw) = (self.cols.len(), self.mw);
         for (y, &(r0, r1, wy)) in self.rows.iter().enumerate() {
-            let (top, bottom) = (&mask[r0 * MW..][..MW], &mask[r1 * MW..][..MW]);
+            let (top, bottom) = (&mask[r0 * mw..][..mw], &mask[r1 * mw..][..mw]);
             for (m, &(c0, c1, wx)) in self.line.iter_mut().zip(&self.cols) {
                 let lerp = |row: &[u8]| u32::from(row[c0]) * (256 - wx) + u32::from(row[c1]) * wx;
                 // 0..255
@@ -239,6 +395,12 @@ impl Blender {
 }
 
 // --------------------------------------------------------------- compositor
+/// One frame for the segmentation thread.
+struct Job {
+    input: Vec<f32>,
+    guide: Vec<f32>,
+}
+
 #[derive(Default)]
 struct Shared {
     state: Mutex<State>,
@@ -247,20 +409,23 @@ struct Shared {
 
 #[derive(Default)]
 struct State {
-    /// Newest model input, waiting for the segmentation thread.
-    input: Option<Vec<f32>>,
-    /// Latest mask and its sequence number, bumped per mask.
+    /// Newest frame, waiting for the segmentation thread.
+    job: Option<Job>,
+    /// Latest mask (half the webcam size) and its sequence number, bumped
+    /// per mask.
     mask: Vec<u8>,
     seq: u64,
     stop: bool,
 }
 
 /// One phone connection's background: [`Compositor::segment`] runs on its own
-/// thread, [`Compositor::apply`] on the decoded frames.
+/// thread, [`Applier::apply`] on the decoded frames.
 pub struct Compositor {
     size: (u32, u32),
+    /// The phone's picture area in the webcam frame.
+    rect: Rect,
     picture: Vec<u8>,
-    model: Model,
+    net: &'static Net,
     shared: Shared,
 }
 
@@ -273,35 +438,45 @@ pub struct Applier<'a> {
 }
 
 impl Compositor {
-    /// `picture`: from [`decode_picture`], at `size`.
-    pub fn new(picture: Vec<u8>, size: (u32, u32)) -> Result<Self, String> {
+    /// `picture`: from [`decode_picture`], at `size`; `rect`: where the
+    /// phone's picture is in each frame.
+    pub fn new(picture: Vec<u8>, size: (u32, u32), rect: Rect) -> Result<Self, String> {
         Ok(Compositor {
             size,
+            rect,
             picture,
-            model: model()?,
+            net: net(rect.w >= rect.h)?,
             shared: Shared::default(),
         })
+    }
+
+    fn mask_size(&self) -> (usize, usize) {
+        (self.size.0 as usize / 2, self.size.1 as usize / 2)
     }
 
     /// Segmentation loop, until [`Compositor::stop`].
     pub fn segment(&self) {
         let mut ema = Vec::new();
+        let size = self.mask_size();
+        let rect = self.rect.scaled(2);
         loop {
-            let input = {
+            let job = {
                 let st = self.shared.state.lock().unwrap();
                 let mut st = self
                     .shared
                     .cv
-                    .wait_while(st, |s| s.input.is_none() && !s.stop)
+                    .wait_while(st, |s| s.job.is_none() && !s.stop)
                     .unwrap();
                 if st.stop {
                     return;
                 }
-                st.input.take().unwrap()
+                st.job.take().unwrap()
             };
-            match infer(&self.model, input) {
+            match self.net.infer(job.input) {
                 Ok(probs) => {
-                    let mask = update_mask(&mut ema, &probs);
+                    smooth(&mut ema, &probs);
+                    let p = upsample(&ema, (self.net.w, self.net.h), size, rect);
+                    let mask = weights(&guided(&job.guide, &p, size));
                     let mut st = self.shared.state.lock().unwrap();
                     st.mask = mask;
                     st.seq += 1;
@@ -322,7 +497,7 @@ impl Compositor {
     pub fn applier(&self) -> Applier<'_> {
         Applier {
             c: self,
-            blender: Blender::new(self.size),
+            blender: Blender::new(self.size, self.mask_size()),
             mask: Vec::new(),
             seq: 0,
         }
@@ -336,10 +511,14 @@ impl Applier<'_> {
         if frame.len() != c.picture.len() {
             return;
         }
-        let input = model_input(frame, c.size);
+        let (w, h) = (c.size.0 as usize, c.size.1 as usize);
+        let job = Job {
+            input: model_input(frame, w, c.rect, (c.net.w, c.net.h)),
+            guide: half_luma(frame, (w, h)),
+        };
         {
             let mut st = c.shared.state.lock().unwrap();
-            st.input = Some(input);
+            st.job = Some(job);
             if st.seq != self.seq {
                 self.seq = st.seq;
                 self.mask.clone_from(&st.mask);
@@ -365,15 +544,18 @@ mod tests {
 
     #[test]
     fn model_input_converts_and_lays_out_nchw() {
+        let n = (256, 144);
         // Limited-range white and black.
-        let white = model_input(&solid((640, 360), 235, 128, 128), (640, 360));
-        assert_eq!(white.len(), 3 * MW * MH);
+        let size = (640, 360);
+        let white = model_input(&solid(size, 235, 128, 128), 640, Rect::full(size), n);
+        assert_eq!(white.len(), 3 * 256 * 144);
         assert!(white.iter().all(|&v| v > 0.99), "{:?}", &white[..4]);
-        let black = model_input(&solid((640, 360), 16, 128, 128), (640, 360));
+        let black = model_input(&solid(size, 16, 128, 128), 640, Rect::full(size), n);
         assert!(black.iter().all(|&v| v < 0.01));
         // Pure-ish red: R plane high, G and B low.
-        let red = model_input(&solid((512, 288), 81, 90, 240), (512, 288));
-        let plane = |c: usize| red[c * MW * MH];
+        let size = (512, 288);
+        let red = model_input(&solid(size, 81, 90, 240), 512, Rect::full(size), n);
+        let plane = |c: usize| red[c * 256 * 144];
         assert!(
             plane(0) > 0.9 && plane(1) < 0.1 && plane(2) < 0.1,
             "{red:?}"
@@ -381,61 +563,133 @@ mod tests {
     }
 
     #[test]
-    fn mask_smooths_and_has_soft_edges() {
+    fn model_input_reads_only_the_picture_area() {
+        // White picture in the middle third, black bars around it.
+        let (w, h) = (96usize, 32usize);
+        let mut f = solid((w as u32, h as u32), 16, 128, 128);
+        for y in 0..h {
+            for x in 32..64 {
+                f[(y * w + x) * 2] = 235;
+            }
+        }
+        let r = Rect {
+            x: 32,
+            y: 0,
+            w: 32,
+            h: 32,
+        };
+        let input = model_input(&f, w, r, (8, 8));
+        assert!(input.iter().all(|&v| v > 0.99));
+    }
+
+    #[test]
+    fn half_luma_averages() {
+        let mut f = solid((4, 2), 16, 128, 128);
+        f[0] = 255; // top-left Y
+        let g = half_luma(&f, (4, 2));
+        assert_eq!(g.len(), 2);
+        assert!((g[0] - (255.0 + 3.0 * 16.0) / (4.0 * 255.0)).abs() < 1e-6);
+        assert!((g[1] - 16.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn smoothing_moves_part_way() {
         let mut ema = Vec::new();
-        let m = update_mask(&mut ema, &[0.0, 0.2, 0.5, 0.8, 1.0]);
-        assert_eq!(m, [0, 0, 128, 255, 255]);
-        // The second mask moves 60% of the way.
-        let m = update_mask(&mut ema, &[1.0, 1.0, 1.0, 1.0, 0.0]);
-        assert_eq!(m[0], 215); // 0.6
-        assert_eq!(m[4], 40); // 0.4
+        smooth(&mut ema, &[0.0, 1.0]);
+        assert_eq!(ema, [0.0, 1.0]);
+        smooth(&mut ema, &[1.0, 0.0]);
+        assert!((ema[0] - 0.6).abs() < 1e-6 && (ema[1] - 0.4).abs() < 1e-6);
+        assert_eq!(weights(&[0.0, 0.25, 0.5, 0.75, 1.0]), [0, 0, 128, 255, 255]);
     }
 
     #[test]
     fn taps_cover_the_source() {
-        let t = taps(1280, MW);
+        let t = taps(1280, 256);
         assert_eq!(t.len(), 1280);
         assert_eq!(t[0], (0, 1, 0));
-        assert_eq!(t[1279].1, MW - 1);
-        assert!(t.iter().all(|&(a, b, w)| a < MW && b < MW && w < 256));
+        assert_eq!(t[1279].1, 255);
+        assert!(t.iter().all(|&(a, b, w)| a < 256 && b < 256 && w < 256));
+    }
+
+    #[test]
+    fn upsample_fills_only_the_rect() {
+        let r = Rect {
+            x: 2,
+            y: 1,
+            w: 4,
+            h: 2,
+        };
+        let m = upsample(&[1.0; 4], (2, 2), (8, 4), r);
+        for y in 0..4 {
+            for x in 0..8 {
+                let inside = (2..6).contains(&x) && (1..3).contains(&y);
+                assert_eq!(m[y * 8 + x], if inside { 1.0 } else { 0.0 }, "{x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn box_mean_clamps_at_borders() {
+        let m = box_mean(&[0.0, 0.0, 3.0, 0.0, 0.0], (5, 1), 1);
+        assert_eq!(m, [0.0, 1.0, 1.0, 1.0, 0.0]);
+        let flat = box_mean(&[2.0; 12], (4, 3), 2);
+        assert!(flat.iter().all(|&v| (v - 2.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn guided_filter_snaps_to_image_edges() {
+        // Image: bright left half, dark right half. Mask: a blurry ramp whose
+        // midpoint sits on the edge. The filtered mask is sharper at the edge.
+        let (w, h) = (16, 4);
+        let i: Vec<f32> = (0..w * h)
+            .map(|k| if k % w < 8 { 0.9 } else { 0.1 })
+            .collect();
+        let p: Vec<f32> = (0..w * h).map(|k| (k % w) as f32 / 15.0).collect();
+        let q = guided(&i, &p, (w, h));
+        let step = |m: &[f32]| m[8] - m[7];
+        assert!(step(&q) > 3.0 * step(&p), "{:?}", &q[..w]);
     }
 
     #[test]
     fn blend_keeps_person_and_replaces_background() {
         let size = (64, 36);
+        let ms = (32, 18);
         let picture = solid(size, 200, 50, 60);
-        let mut blender = Blender::new(size);
+        let mut blender = Blender::new(size, ms);
 
         let mut frame = solid(size, 100, 120, 130);
-        blender.blend(&mut frame, &picture, &[255; MW * MH]);
+        blender.blend(&mut frame, &picture, &[255; 32 * 18]);
         assert_eq!(frame, solid(size, 100, 120, 130));
 
-        blender.blend(&mut frame, &picture, &[0; MW * MH]);
+        blender.blend(&mut frame, &picture, &[0; 32 * 18]);
         assert_eq!(frame, picture);
 
         // Half: halfway between the two.
         let mut frame = solid(size, 100, 120, 130);
-        blender.blend(&mut frame, &picture, &[128; MW * MH]);
+        blender.blend(&mut frame, &picture, &[128; 32 * 18]);
         assert_eq!(&frame[..4], [150, 85, 150, 95]);
     }
 
     #[test]
     fn applier_shows_the_picture_until_the_first_mask() {
         let size = (64, 36);
-        let c = Compositor::new(solid(size, 200, 50, 60), size).unwrap();
+        let c = Compositor::new(solid(size, 200, 50, 60), size, Rect::full(size)).unwrap();
         let mut a = c.applier();
         let mut frame = solid(size, 100, 120, 130);
         a.apply(&mut frame);
         assert_eq!(frame, c.picture);
-        assert!(c.shared.state.lock().unwrap().input.is_some());
+        assert!(c.shared.state.lock().unwrap().job.is_some());
     }
 
     #[test]
-    fn model_runs() {
-        let m = model().unwrap();
-        let probs = infer(&m, vec![0.5; 3 * MW * MH]).unwrap();
-        assert_eq!(probs.len(), MW * MH);
-        assert!(probs.iter().all(|p| (0.0..=1.0).contains(p)));
+    fn models_run() {
+        for (landscape, n) in [(true, (256, 144)), (false, (256, 256))] {
+            let net = net(landscape).unwrap();
+            assert_eq!((net.w, net.h), n);
+            let probs = net.infer(vec![0.5; 3 * n.0 * n.1]).unwrap();
+            assert_eq!(probs.len(), n.0 * n.1);
+            assert!(probs.iter().all(|p| (0.0..=1.0).contains(p)));
+        }
     }
 
     #[test]

@@ -253,6 +253,29 @@ pub(crate) fn frame_size((w, h): (u32, u32)) -> usize {
     w as usize * h as usize * BYTES_PER_PIXEL
 }
 
+/// Where the upright phone picture lands in the webcam frame with plain bars:
+/// the same arithmetic as ffmpeg's `force_original_aspect_ratio=decrease`
+/// (rounded to nearest, then down to even) and the centred `pad`.
+fn picture_rect(info: &Info, (w, h): (u32, u32)) -> background::Rect {
+    let (sw, sh) = match info.rotation {
+        90 | 270 => (info.height, info.width),
+        _ => (info.width, info.height),
+    };
+    if sw == 0 || sh == 0 {
+        return background::Rect::full((w, h));
+    }
+    let (sw, sh, w, h) = (u64::from(sw), u64::from(sh), u64::from(w), u64::from(h));
+    let rescale = |a: u64, b: u64, c: u64| (a * b + c / 2) / c;
+    let pw = rescale(h, sw, sh).min(w) / 2 * 2;
+    let ph = rescale(w, sh, sw).min(h) / 2 * 2;
+    background::Rect {
+        x: ((w - pw) / 2) as usize,
+        y: ((h - ph) / 2) as usize,
+        w: pw.max(2) as usize,
+        h: ph.max(2) as usize,
+    }
+}
+
 /// ffmpeg filter that turns the decoded image upright.
 fn rotate_filter(rotation: u16) -> Option<&'static str> {
     match rotation {
@@ -706,9 +729,10 @@ fn open(cfg: &Config, v2: bool) -> Result<(Channel, Hello), HelloError> {
 
 /// The background for this connection, if the phone sent a picture and it
 /// can be used; problems are logged and the stream goes on without it.
-fn compositor(picture: Option<Vec<u8>>, size: (u32, u32)) -> Option<Compositor> {
+fn compositor(picture: Option<Vec<u8>>, info: &Info, size: (u32, u32)) -> Option<Compositor> {
     let jpeg = picture?;
-    let made = background::decode_picture(&jpeg, size).and_then(|p| Compositor::new(p, size));
+    let rect = picture_rect(info, size);
+    let made = background::decode_picture(&jpeg, size).and_then(|p| Compositor::new(p, size, rect));
     match made {
         Ok(c) => Some(c),
         Err(e) => {
@@ -746,7 +770,7 @@ fn session(cfg: &Config, procs: &Procs, feed: &Feed, live: &Live) -> Result<Outc
     if info.codec != CODEC_H264 {
         return failed(format!("unsupported video codec {}", info.codec));
     }
-    let comp = compositor(picture, cfg.size);
+    let comp = compositor(picture, &info, cfg.size);
     let (w, h) = cfg.size;
     log!(
         "camera: streaming {}x{} at {} fps, rotation {}°, to {} as {w}x{h}{}",
@@ -1096,6 +1120,35 @@ mod tests {
             "{vf}"
         );
         assert_eq!(rotate_filter(180), Some("hflip,vflip"));
+    }
+
+    #[test]
+    fn picture_rect_matches_the_fit() {
+        use background::Rect;
+        // Portrait 720p phone picture in a 1280x720 webcam: 405 -> 404 wide.
+        assert_eq!(
+            picture_rect(&info(1280, 720, 90), (1280, 720)),
+            Rect {
+                x: 438,
+                y: 0,
+                w: 404,
+                h: 720
+            }
+        );
+        assert_eq!(
+            picture_rect(&info(1920, 1080, 0), (1280, 720)),
+            Rect::full((1280, 720))
+        );
+        // 4:3 landscape: bars left and right.
+        assert_eq!(
+            picture_rect(&info(640, 480, 0), (1280, 720)),
+            Rect {
+                x: 160,
+                y: 0,
+                w: 960,
+                h: 720
+            }
+        );
         assert_eq!(rotate_filter(0), None);
     }
 
