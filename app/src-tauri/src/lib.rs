@@ -78,7 +78,8 @@ pub struct CameraConfig {
     /// the PC applies.
     pub orientation: String,
     /// Virtual background the PC puts behind the person: "" off, a built-in
-    /// one ("studio", "office", "daylight") or "custom" (the user's photo).
+    /// one ("studio", "office", "daylight", "fireplace") or "custom" (the
+    /// user's photo).
     #[serde(default)]
     pub background: String,
 }

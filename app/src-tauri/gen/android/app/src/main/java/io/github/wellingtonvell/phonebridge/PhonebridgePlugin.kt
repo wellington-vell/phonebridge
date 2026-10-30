@@ -62,7 +62,8 @@ class CameraArgs {
     var allowUnauthenticated: Boolean = false
     /**
      * Virtual background sent to the PC: "" off, a built-in one ("studio",
-     * "office", "daylight") or "custom" (the photo from pickBackground).
+     * "office", "daylight", "fireplace") or "custom" (the photo from
+     * pickBackground).
      */
     var background: String = ""
 }
@@ -271,14 +272,18 @@ class PhonebridgePlugin(private val activity: Activity) : Plugin(activity) {
     /** The user's own virtual background picture, a JPEG the PC puts behind the person. */
     private val backgroundFile get() = File(activity.filesDir, "background.jpg")
 
-    /** Built-in backgrounds (res/raw, made by app/backgrounds/generate.py). */
+    /**
+     * Built-in backgrounds (res/raw, made by app/backgrounds/generate.py and,
+     * the animated GIF, app/backgrounds/fireplace.py).
+     */
     private val builtInBackgrounds = mapOf(
         "studio" to R.raw.bg_studio,
         "office" to R.raw.bg_office,
         "daylight" to R.raw.bg_daylight,
+        "fireplace" to R.raw.bg_fireplace,
     )
 
-    /** The JPEG for a CameraArgs.background name; null when off or missing. */
+    /** The picture (JPEG or GIF) for a CameraArgs.background name; null when off or missing. */
     private fun backgroundBytes(name: String): ByteArray? = runCatching {
         when (name) {
             "" -> null

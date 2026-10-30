@@ -19,8 +19,8 @@
 //!        status != 0: [msg_len u16][UTF-8 msg] follows and the phone closes
 //!        (1: camera sharing disabled on the phone, 2: camera unavailable)
 //!        codec 1: H.264 Annex-B; rotation: degrees clockwise to display upright
-//!        PBV2, status 0: [bg_len u32][bg_len bytes JPEG] follows, the virtual
-//!        background picture (0: none; see `background`)
+//!        PBV2, status 0: [bg_len u32][bg_len bytes JPEG or GIF] follows, the
+//!        virtual background picture, a GIF animated (0: none; see `background`)
 //!   <- frames: [len u32][pts_us u64][flags u8][len bytes of H.264 Annex-B]
 //!        flags: bit0 keyframe, bit1 codec config (SPS/PPS, always sent first)
 //!
@@ -185,7 +185,7 @@ fn hello(sock: &mut (impl Read + Write), v2: bool) -> Result<Hello, HelloError> 
     Ok(Hello::Refused { status, msg })
 }
 
-/// PBV2's background picture: [bg_len u32][JPEG].
+/// PBV2's background picture: [bg_len u32][JPEG or GIF].
 fn read_picture(sock: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     let mut len = [0u8; 4];
     recv_exact(sock, &mut len)?;
@@ -730,9 +730,10 @@ fn open(cfg: &Config, v2: bool) -> Result<(Channel, Hello), HelloError> {
 /// The background for this connection, if the phone sent a picture and it
 /// can be used; problems are logged and the stream goes on without it.
 fn compositor(picture: Option<Vec<u8>>, info: &Info, size: (u32, u32)) -> Option<Compositor> {
-    let jpeg = picture?;
+    let bytes = picture?;
     let rect = picture_rect(info, size);
-    let made = background::decode_picture(&jpeg, size).and_then(|p| Compositor::new(p, size, rect));
+    let made =
+        background::decode_picture(&bytes, size).and_then(|p| Compositor::new(p, size, rect));
     match made {
         Ok(c) => Some(c),
         Err(e) => {

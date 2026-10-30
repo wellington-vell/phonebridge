@@ -620,11 +620,11 @@ code,
   margin-right: -10px;
 }
 
-/* Virtual background picker: three built-in pictures and the user's photo. */
+/* Virtual background picker: four built-in pictures and the user's photo. */
 .bg-pick {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   padding: 2px 16px 8px;
 }
@@ -645,6 +645,9 @@ code,
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+.bg-tile img[src$=".gif"] {
+  image-rendering: pixelated;
 }
 .bg-tile span {
   position: absolute;

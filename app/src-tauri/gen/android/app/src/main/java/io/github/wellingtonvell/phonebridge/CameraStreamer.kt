@@ -55,8 +55,8 @@ import kotlin.math.abs
  *   PC -> "PBV2" (or "PBV1")
  *   phone -> the same magic, status u8 | codec u8 | width u16 | height u16 | rotation u16 | fps u8
  *            (status != 0: then [msg_len u16][UTF-8 message] and close)
- *            PBV2, status 0: then [bg_len u32][JPEG], the virtual background
- *            picture the PC puts behind the person (bg_len 0: none)
+ *            PBV2, status 0: then [bg_len u32][JPEG or GIF], the virtual background
+ *            picture (a GIF animated) the PC puts behind the person (bg_len 0: none)
  *   phone -> repeated [len u32][pts_us u64][flags u8][H.264 Annex-B, len bytes]
  *            flags: bit0 keyframe, bit1 codec config (SPS/PPS)
  *
@@ -85,7 +85,7 @@ class CameraStreamer(
         val token: String = "",
         /** Also accept plaintext `PBV1` clients (no pairing code). */
         val allowUnauthenticated: Boolean = false,
-        /** Virtual background picture (JPEG) for PBV2 clients; null: off. */
+        /** Virtual background picture (JPEG or GIF) for PBV2 clients; null: off. */
         val background: ByteArray? = null,
     )
 

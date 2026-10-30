@@ -66,7 +66,7 @@ const DEFAULTS = {
   orientation: "landscape",
   // Virtual background: the picture goes to the PC, which puts it behind you.
   background: false,
-  // "studio" | "office" | "daylight" (built in) | "custom" (your photo)
+  // "studio" | "office" | "daylight" | "fireplace" (built in) | "custom" (your photo)
   backgroundImage: "studio",
 };
 

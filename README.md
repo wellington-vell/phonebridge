@@ -167,15 +167,20 @@ that is using it never sees it vanish or change size: its video just resumes.
 #### Virtual background
 
 Turn on **Virtual background** in the phone app's camera settings and pick a
-picture: one of the three built in (**Studio**, a graphite backdrop; **Office**,
+picture: one of the four built in (**Studio**, a graphite backdrop; **Office**,
 a softly defocused workspace; **Daylight**, a light wall with window-blind
-shadows) or **Your photo**, any picture from the phone. The phone sends the
+shadows; **Fireplace**, an animated pixel-art cabin at night with a crackling
+fire) or **Your photo**, any picture from the phone. The phone sends the
 picture to the PC with the video, and the PC cuts you out of each frame and
 puts you in front of it. Segmentation uses
 [MediaPipe Selfie Segmentation](models/README.md), run on the CPU by
 [tract](https://github.com/sonos/tract), which is built into the binary (about
 4 ms per frame, on its own thread so it never holds the video back). A portrait
 picture in a landscape webcam fills the side bars with the picture too.
+An animated background (a GIF) loops at 10 fps, scaled up with
+nearest-neighbour so pixel art stays crisp; up to 96 MB of decoded frames are
+kept (about 5 s at 720p, 2.4 s at 1080p). A PC client from before animated
+backgrounds streams without one when the phone sends a GIF.
 Turning it on or off, or choosing another picture, reconnects the stream, so
 the last frame stays for a moment. If the phone app is older than this
 feature, the client streams without a background.
@@ -321,7 +326,8 @@ speaks it).
 - **Virtual background**: pick a built-in picture or one of your own, and the
   PC replaces what's behind you with it (see
   [Virtual background](#virtual-background)); the built-in ones are generated
-  by `app/backgrounds/generate.py`
+  by `app/backgrounds/generate.py` and, the animated Fireplace,
+  `app/backgrounds/fireplace.py`
 - **Keep screen on while connected**, plus a foreground service so capture
   keeps running with the screen off
 

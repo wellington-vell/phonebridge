@@ -1,8 +1,10 @@
 //! Virtual background: the person cut out of each webcam frame and put over a
 //! picture chosen in the phone app.
 //!
-//! The phone sends the picture (JPEG) in its video hello; ffmpeg turns it into
-//! one webcam-size YUYV frame. A segmentation thread runs MediaPipe Selfie
+//! The phone sends the picture (JPEG, or an animated GIF) in its video hello;
+//! ffmpeg turns it into webcam-size YUYV frames: one for a JPEG, the GIF's
+//! loop at [`ANIM_FPS`] for a GIF (scaled with nearest-neighbour, as those
+//! are pixel art), played over and over. A segmentation thread runs MediaPipe Selfie
 //! Segmentation (models/, Apache-2.0) with tract on the phone's picture area
 //! of the newest frame (the landscape model for landscape, the square one for
 //! portrait, so the person gets all of the model's resolution), refines the
@@ -15,6 +17,7 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use tract_onnx::prelude::*;
 
@@ -33,12 +36,28 @@ const RADIUS: usize = 4;
 const EPS: f32 = 0.002;
 /// Refined probabilities between these fade from background to person.
 const EDGE: (f32, f32) = (0.25, 0.75);
+/// Animated backgrounds play at this rate, whatever the GIF's own timing.
+const ANIM_FPS: u32 = 10;
+/// Memory for an animation's decoded frames (37 MB for a 2 s loop at 720p).
+const ANIM_BYTES: usize = 96 << 20;
+/// Longest loop kept, in frames (the rest of a longer GIF is dropped).
+const ANIM_FRAMES: usize = 60;
 
 // ------------------------------------------------------------------ picture
-/// One-shot ffmpeg: the phone's JPEG on stdin, cropped to fill the webcam
-/// size, one YUYV frame out. Only the MJPEG decoder, and allocations capped,
-/// as the picture comes from the network.
-fn picture_args((w, h): (u32, u32)) -> Vec<String> {
+/// Whether the phone's picture is a GIF (else it is taken for a JPEG).
+fn is_gif(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")
+}
+
+/// Frames kept of an animation at this webcam size.
+fn max_frames(size: (u32, u32)) -> usize {
+    (ANIM_BYTES / frame_size(size)).clamp(1, ANIM_FRAMES)
+}
+
+/// One-shot ffmpeg: the phone's picture on stdin, cropped to fill the webcam
+/// size, YUYV frames out (one for a JPEG). Only the MJPEG or GIF decoder, and
+/// allocations and frames capped, as the picture comes from the network.
+fn picture_args((w, h): (u32, u32), gif: bool) -> Vec<String> {
     let mut a = strings([
         "-hide_banner",
         "-loglevel",
@@ -49,32 +68,32 @@ fn picture_args((w, h): (u32, u32)) -> Vec<String> {
         "-threads",
         "1",
         "-f",
-        "image2pipe",
-        "-c:v",
-        "mjpeg",
-        "-i",
-        "-",
-        "-vf",
     ]);
+    a.extend(strings(if gif {
+        ["gif", "-c:v", "gif"]
+    } else {
+        ["image2pipe", "-c:v", "mjpeg"]
+    }));
+    a.extend(strings(["-i", "-", "-vf"]));
+    let (fps, flags) = if gif {
+        (format!("fps={ANIM_FPS},"), ":flags=neighbor")
+    } else {
+        (String::new(), "")
+    };
     a.push(format!(
-        "scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,format={PIX_FMT}"
+        "{fps}scale={w}:{h}:force_original_aspect_ratio=increase{flags},crop={w}:{h},setsar=1,format={PIX_FMT}"
     ));
-    a.extend(strings([
-        "-frames:v",
-        "1",
-        "-pix_fmt",
-        PIX_FMT,
-        "-f",
-        "rawvideo",
-        "-",
-    ]));
+    let frames = if gif { max_frames((w, h)) } else { 1 };
+    a.extend(["-frames:v".into(), frames.to_string()]);
+    a.extend(strings(["-pix_fmt", PIX_FMT, "-f", "rawvideo", "-"]));
     a
 }
 
-/// The background picture as a webcam-size YUYV frame.
-pub fn decode_picture(jpeg: &[u8], size: (u32, u32)) -> Result<Vec<u8>, String> {
+/// The background picture as webcam-size YUYV frames: one for a still
+/// picture, the loop for an animated one.
+pub fn decode_picture(bytes: &[u8], size: (u32, u32)) -> Result<Vec<Vec<u8>>, String> {
     let mut child = Command::new("ffmpeg")
-        .args(picture_args(size))
+        .args(picture_args(size, is_gif(bytes)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -84,13 +103,14 @@ pub fn decode_picture(jpeg: &[u8], size: (u32, u32)) -> Result<Vec<u8>, String> 
     // Fed from a thread: ffmpeg may fill stdout before reading all of stdin.
     let out = thread::scope(|s| {
         s.spawn(move || {
-            let _ = stdin.write_all(jpeg);
+            let _ = stdin.write_all(bytes);
         });
         child.wait_with_output()
     })
     .map_err(|e| format!("ffmpeg: {e}"))?;
-    if out.status.success() && out.stdout.len() == frame_size(size) {
-        Ok(out.stdout)
+    let n = frame_size(size);
+    if out.status.success() && !out.stdout.is_empty() && out.stdout.len() % n == 0 {
+        Ok(out.stdout.chunks_exact(n).map(<[u8]>::to_vec).collect())
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.lines().next().unwrap_or("no picture decoded");
@@ -424,7 +444,9 @@ pub struct Compositor {
     size: (u32, u32),
     /// The phone's picture area in the webcam frame.
     rect: Rect,
-    picture: Vec<u8>,
+    /// The background: one frame, or an animation's loop at [`ANIM_FPS`].
+    pictures: Vec<Vec<u8>>,
+    start: Instant,
     net: &'static Net,
     shared: Shared,
 }
@@ -438,16 +460,31 @@ pub struct Applier<'a> {
 }
 
 impl Compositor {
-    /// `picture`: from [`decode_picture`], at `size`; `rect`: where the
-    /// phone's picture is in each frame.
-    pub fn new(picture: Vec<u8>, size: (u32, u32), rect: Rect) -> Result<Self, String> {
+    /// `pictures`: from [`decode_picture`] (at least one), at `size`; `rect`:
+    /// where the phone's picture is in each frame.
+    pub fn new(pictures: Vec<Vec<u8>>, size: (u32, u32), rect: Rect) -> Result<Self, String> {
+        if pictures.is_empty() {
+            return Err("no background picture".into());
+        }
         Ok(Compositor {
             size,
             rect,
-            picture,
+            pictures,
+            start: Instant::now(),
             net: net(rect.w >= rect.h)?,
             shared: Shared::default(),
         })
+    }
+
+    /// The background to show now: an animation plays in a loop.
+    fn picture(&self) -> &[u8] {
+        self.picture_at(self.start.elapsed())
+    }
+
+    fn picture_at(&self, t: Duration) -> &[u8] {
+        let frame = Duration::from_secs(1) / ANIM_FPS;
+        let i = t.as_nanos() / frame.as_nanos();
+        &self.pictures[(i % self.pictures.len() as u128) as usize]
     }
 
     fn mask_size(&self) -> (usize, usize) {
@@ -508,7 +545,8 @@ impl Applier<'_> {
     /// Queue `frame` for segmentation and blend it with the latest mask.
     pub fn apply(&mut self, frame: &mut [u8]) {
         let c = self.c;
-        if frame.len() != c.picture.len() {
+        let picture = c.picture();
+        if frame.len() != picture.len() {
             return;
         }
         let (w, h) = (c.size.0 as usize, c.size.1 as usize);
@@ -526,9 +564,9 @@ impl Applier<'_> {
         }
         c.shared.cv.notify_one();
         if self.mask.is_empty() {
-            frame.copy_from_slice(&c.picture);
+            frame.copy_from_slice(picture);
         } else {
-            self.blender.blend(frame, &c.picture, &self.mask);
+            self.blender.blend(frame, picture, &self.mask);
         }
     }
 }
@@ -673,11 +711,11 @@ mod tests {
     #[test]
     fn applier_shows_the_picture_until_the_first_mask() {
         let size = (64, 36);
-        let c = Compositor::new(solid(size, 200, 50, 60), size, Rect::full(size)).unwrap();
+        let c = Compositor::new(vec![solid(size, 200, 50, 60)], size, Rect::full(size)).unwrap();
         let mut a = c.applier();
         let mut frame = solid(size, 100, 120, 130);
         a.apply(&mut frame);
-        assert_eq!(frame, c.picture);
+        assert_eq!(frame, c.pictures[0]);
         assert!(c.shared.state.lock().unwrap().job.is_some());
     }
 
@@ -694,11 +732,43 @@ mod tests {
 
     #[test]
     fn picture_args_fill_the_webcam() {
-        let a = picture_args((1280, 720));
+        let a = picture_args((1280, 720), false);
         let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
         assert!(
             vf.starts_with("scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720")
         );
         assert!(a.windows(2).any(|p| p == ["-c:v", "mjpeg"]));
+        assert!(a.windows(2).any(|p| p == ["-frames:v", "1"]));
+    }
+
+    #[test]
+    fn gif_args_play_crisp_and_capped() {
+        assert!(is_gif(b"GIF89a...") && is_gif(b"GIF87a") && !is_gif(b"\xff\xd8\xff"));
+        let a = picture_args((1280, 720), true);
+        let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
+        assert!(vf.starts_with(
+            "fps=10,scale=1280:720:force_original_aspect_ratio=increase:flags=neighbor,crop="
+        ));
+        assert!(a.windows(2).any(|p| p == ["-c:v", "gif"]));
+        assert!(a.windows(2).any(|p| p == ["-frames:v", "54"]));
+        assert_eq!(max_frames((1920, 1080)), 24);
+        assert_eq!(max_frames((640, 360)), ANIM_FRAMES);
+    }
+
+    #[test]
+    fn animation_loops_in_time() {
+        let size = (8, 2);
+        let c = Compositor::new(
+            vec![solid(size, 1, 0, 0), solid(size, 2, 0, 0)],
+            size,
+            Rect::full(size),
+        )
+        .unwrap();
+        let at = |ms| c.picture_at(Duration::from_millis(ms))[0];
+        assert_eq!(
+            [at(0), at(99), at(100), at(199), at(200), at(350)],
+            [1, 1, 2, 2, 1, 2]
+        );
+        assert!(Compositor::new(Vec::new(), size, Rect::full(size)).is_err());
     }
 }
