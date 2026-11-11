@@ -242,7 +242,13 @@ echo "--wifi 192.168.1.23" > ~/.config/phonebridge/args
 ```
 
 Keep to options that both instances accept (`--wifi`, `--port`, `--no-adb`);
-`--bluetooth` works for the microphone only. Both instances also read the
+`--bluetooth` works for the microphone only.
+
+Without that file they reuse the options of the last `start` / `toggle` that
+had some (each instance its own, kept without the pairing code in
+`~/.local/state/phonebridge/`). So after one `phonebridge start --wifi
+192.168.1.23`, the bar and desktop toggles keep using Wi-Fi until you start
+with other options. Both instances also read the
 [pairing code](#pairing-code) file, so keep the code there rather than in `args`.
 
 The Nix package ships a **Phonebridge** desktop entry that runs `phonebridge toggle`.

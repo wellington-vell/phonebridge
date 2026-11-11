@@ -87,7 +87,8 @@ options:
   -h, --help         show this help
 
 start and toggle (also camera start / toggle) without OPTIONS read default
-options from $XDG_CONFIG_HOME/phonebridge/args, e.g. `--wifi 192.168.1.20`.
+options from $XDG_CONFIG_HOME/phonebridge/args, e.g. `--wifi 192.168.1.20`;
+without that file they reuse the OPTIONS of the last start / toggle.
 
 webcam (USB or Wi-Fi; needs ffmpeg and the v4l2loopback kernel module):
   --camera           also stream the phone's camera to a v4l2loopback webcam
@@ -571,7 +572,10 @@ fn main() -> ExitCode {
     // Validate client options up front so `start` fails loudly, not in the log.
     let background = |kind, cmd: &str, given: &[String]| {
         let args = control::client_args(kind, cmd, given);
-        parse_args(args.iter().cloned()).and_then(|_| control::run(kind, cmd, &args))
+        parse_args(args.iter().cloned()).and_then(|_| {
+            control::remember(kind, cmd, given);
+            control::run(kind, cmd, &args)
+        })
     };
     let result = match argv.first().map(String::as_str) {
         Some("camera") => match argv.get(1).map(String::as_str) {

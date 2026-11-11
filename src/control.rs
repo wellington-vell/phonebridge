@@ -21,8 +21,10 @@
 //! camera.
 //!
 //! `start` / `toggle` without OPTIONS read default options from
-//! $XDG_CONFIG_HOME/phonebridge/args (e.g. `--wifi 192.168.1.20`), so desktop
-//! toggles that pass no options can still use Wi-Fi.
+//! $XDG_CONFIG_HOME/phonebridge/args (e.g. `--wifi 192.168.1.20`), else reuse
+//! the options of the last `start` / `toggle` that had some (kept, without the
+//! pairing code, in $XDG_STATE_HOME/phonebridge), so desktop toggles that pass
+//! no options can still use Wi-Fi.
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -186,13 +188,47 @@ fn parse_defaults(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The client arguments for a background command: the given options, or the
-/// defaults file when starting without any; camera-only flags for the camera.
+/// Where the options of the last start with options are kept:
+/// $XDG_STATE_HOME/phonebridge (~/.local/state/phonebridge), which outlives
+/// a reboot, unlike the runtime directory.
+fn last_args_file(kind: Kind) -> Option<PathBuf> {
+    let dir = env_dir("XDG_STATE_HOME")
+        .or_else(|| env_dir("HOME").map(|h| h.join(".local").join("state")))?
+        .join("phonebridge");
+    Some(dir.join(format!("{}.args", kind.name())))
+}
+
+/// Remember the options of a start (minus the pairing code) for later starts
+/// without options. Best effort: a failure only costs the memory.
+pub fn remember(kind: Kind, cmd: &str, given: &[String]) {
+    if given.is_empty() || !matches!(cmd, "start" | "toggle") {
+        return;
+    }
+    let Some(file) = last_args_file(kind) else {
+        return;
+    };
+    let (args, _) = split_token(given);
+    let saved = file
+        .parent()
+        .map_or(Ok(()), private_dir)
+        .and_then(|()| write_file(&file, (args.join("\n") + "\n").as_bytes()));
+    if let Err(e) = saved {
+        eprintln!(
+            "phonebridge: cannot remember options in {}: {e}",
+            file.display()
+        );
+    }
+}
+
+/// The client arguments for a background command: the given options, else
+/// (when starting) the defaults file, else the last options remembered;
+/// camera-only flags for the camera.
 pub fn client_args(kind: Kind, cmd: &str, given: &[String]) -> Vec<String> {
     let mut args = given.to_vec();
     if args.is_empty() && matches!(cmd, "start" | "toggle") {
         args = config_dir()
             .and_then(|d| fs::read_to_string(d.join("args")).ok())
+            .or_else(|| last_args_file(kind).and_then(|f| read_file(&f).ok()))
             .map(|t| parse_defaults(&t))
             .unwrap_or_default();
     }
