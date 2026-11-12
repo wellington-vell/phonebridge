@@ -23,8 +23,9 @@
 //! `start` / `toggle` without OPTIONS read default options from
 //! $XDG_CONFIG_HOME/phonebridge/args (e.g. `--wifi 192.168.1.20`), else reuse
 //! the options of the last `start` / `toggle` that had some (kept, without the
-//! pairing code, in $XDG_STATE_HOME/phonebridge), so desktop toggles that pass
-//! no options can still use Wi-Fi.
+//! pairing code, in $XDG_STATE_HOME/phonebridge); the camera, never started
+//! with options, takes the microphone's last connection. So desktop toggles
+//! that pass no options can still use Wi-Fi.
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -220,16 +221,46 @@ pub fn remember(kind: Kind, cmd: &str, given: &[String]) {
     }
 }
 
+/// The connection options (`--wifi` / `--ip`, `--port`, `--no-adb`) out of
+/// `args`, for the camera to reuse the microphone's connection. Everything
+/// else is the microphone's own, and Bluetooth can't carry video.
+fn connection_args(args: &[String]) -> Vec<String> {
+    let mut kept = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let flag = a.split_once('=').map_or(a.as_str(), |(f, _)| f);
+        match flag {
+            "--no-adb" => kept.push(a.clone()),
+            "--wifi" | "--ip" | "--port" => {
+                kept.push(a.clone());
+                if !a.contains('=') {
+                    kept.extend(it.next().cloned());
+                }
+            }
+            _ => {}
+        }
+    }
+    kept
+}
+
 /// The client arguments for a background command: the given options, else
-/// (when starting) the defaults file, else the last options remembered;
-/// camera-only flags for the camera.
+/// (when starting) the defaults file, else the last options remembered, else
+/// for the camera the microphone's last connection; camera-only flags for the
+/// camera.
 pub fn client_args(kind: Kind, cmd: &str, given: &[String]) -> Vec<String> {
     let mut args = given.to_vec();
     if args.is_empty() && matches!(cmd, "start" | "toggle") {
+        let last = |kind| last_args_file(kind).and_then(|f| read_file(&f).ok());
         args = config_dir()
             .and_then(|d| fs::read_to_string(d.join("args")).ok())
-            .or_else(|| last_args_file(kind).and_then(|f| read_file(&f).ok()))
+            .or_else(|| last(kind))
             .map(|t| parse_defaults(&t))
+            .or_else(|| {
+                (kind == Kind::Camera)
+                    .then(|| last(Kind::Mic))
+                    .flatten()
+                    .map(|t| connection_args(&parse_defaults(&t)))
+            })
             .unwrap_or_default();
     }
     if kind == Kind::Camera {
@@ -552,6 +583,31 @@ mod tests {
             ["--wifi", "10.0.0.2", "--camera", "--no-mic"]
         );
         assert_eq!(client_args(Kind::Mic, "stop", &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn camera_takes_the_mic_connection() {
+        let mic: Vec<String> = [
+            "--wifi",
+            "h",
+            "--udp",
+            "9000",
+            "--port=8200",
+            "--name",
+            "Mic",
+            "--no-adb",
+            "--ip=x",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(
+            connection_args(&mic),
+            ["--wifi", "h", "--port=8200", "--no-adb", "--ip=x"]
+        );
+        let bt: Vec<String> = ["--bluetooth", "AA:BB:CC:DD:EE:FF", "--bt-channel", "4"]
+            .map(String::from)
+            .into();
+        assert!(connection_args(&bt).is_empty());
     }
 
     #[test]

@@ -248,7 +248,9 @@ Without that file they reuse the options of the last `start` / `toggle` that
 had some (each instance its own, kept without the pairing code in
 `~/.local/state/phonebridge/`). So after one `phonebridge start --wifi
 192.168.1.23`, the bar and desktop toggles keep using Wi-Fi until you start
-with other options. Both instances also read the
+with other options. A camera that has never been started with options takes
+the microphone's last connection (`--wifi`, `--port`, `--no-adb`; not
+Bluetooth, which can't carry video). Both instances also read the
 [pairing code](#pairing-code) file, so keep the code there rather than in `args`.
 
 The Nix package ships a **Phonebridge** desktop entry that runs `phonebridge toggle`.

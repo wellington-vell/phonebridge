@@ -88,7 +88,8 @@ options:
 
 start and toggle (also camera start / toggle) without OPTIONS read default
 options from $XDG_CONFIG_HOME/phonebridge/args, e.g. `--wifi 192.168.1.20`;
-without that file they reuse the OPTIONS of the last start / toggle.
+without that file they reuse the OPTIONS of the last start / toggle (the
+camera, until started with OPTIONS, the microphone's last connection).
 
 webcam (USB or Wi-Fi; needs ffmpeg and the v4l2loopback kernel module):
   --camera           also stream the phone's camera to a v4l2loopback webcam
