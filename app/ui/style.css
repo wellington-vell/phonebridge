@@ -905,6 +905,43 @@ input[type="range"]::-moz-range-thumb {
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
 }
 
+/* Noise gate: the live level over the threshold slider, on the same scale
+   (inset by the thumb's radius, where the slider's ends are). Green while
+   the gate lets sound through. */
+.gate-meter {
+  height: 4px;
+  margin: 6px 14px 0;
+  border-radius: 2px;
+  background: var(--fill);
+  overflow: hidden;
+}
+.gate-meter span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--muted);
+  transition: width 120ms linear;
+}
+.gate-meter span.open {
+  background: var(--accent);
+}
+.gate-hint {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+/* Left of the thumb is what gets cut: draw it as the empty part. */
+#gate-threshold::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, var(--fill-strong) 0 var(--fill), var(--accent) var(--fill));
+}
+#gate-threshold::-moz-range-track {
+  background: var(--accent);
+}
+#gate-threshold::-moz-range-progress {
+  background: var(--fill-strong);
+}
+
 /* Connect your PC: numbered steps. */
 .step {
   position: relative;

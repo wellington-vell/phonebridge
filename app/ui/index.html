@@ -155,6 +155,16 @@
             <span class="row-top"><span class="row-label">Volume</span><output id="gain-value" class="row-value">100%</output></span>
             <input id="gain" type="range" min="0" max="400" step="5" value="100" />
           </label>
+          <label class="row">
+            <span class="row-label">Noise gate<small>Only sends sound louder than the line, so quieter voices in the room stay out</small></span>
+            <input id="gate" class="switch" type="checkbox" role="switch" />
+          </label>
+          <div id="gate-row" class="row slider-row" hidden>
+            <span class="row-top"><span class="row-label">Threshold</span><output id="gate-value" class="row-value">−35 dB</output></span>
+            <div class="gate-meter" aria-hidden="true"><span id="gate-level"></span></div>
+            <input id="gate-threshold" type="range" min="-70" max="-5" step="1" value="-35" aria-label="Noise gate threshold" />
+            <span class="gate-hint">Talk normally and set the line just under your voice, above the room's.</span>
+          </div>
           <label class="row disclosure">
             <span class="row-label">Audio source</span>
             <span class="row-value" data-for="source"></span>

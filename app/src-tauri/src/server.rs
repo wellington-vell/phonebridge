@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capture::{Capture, Source};
 use crate::encoder::{Encoder, FRAME};
+use crate::gate::{self, Gate};
 use crate::secure::{self, Key, RecordReader, RecordWriter, STEP_TIMEOUT, UdpSealer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +67,10 @@ pub struct Shared {
     gain: AtomicU32,
     pub muted: AtomicBool,
     level: AtomicU32,
+    /// Noise gate threshold, dBFS (f32 bits); NaN when the gate is off.
+    gate: AtomicU32,
+    /// The gate is silencing the microphone right now.
+    gated: AtomicBool,
     pub source: Mutex<Source>,
     pub status: Mutex<Status>,
     pub stop: AtomicBool,
@@ -75,6 +80,7 @@ impl Shared {
     pub fn new() -> Self {
         let s = Self::default();
         s.set_gain(1.0);
+        s.set_gate(None);
         s
     }
 
@@ -87,9 +93,25 @@ impl Shared {
             .store(gain.clamp(0.0, 4.0).to_bits(), Ordering::Relaxed);
     }
 
-    /// Peak of the last frame sent, 0..1 (after gain, 0 when muted).
+    /// Peak of the last frame captured, 0..1 (after gain and before the
+    /// noise gate, so the UI can show it against the threshold; 0 when muted).
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    /// Noise gate threshold in dBFS, or None when off.
+    pub fn gate(&self) -> Option<f32> {
+        Some(f32::from_bits(self.gate.load(Ordering::Relaxed))).filter(|db| !db.is_nan())
+    }
+
+    pub fn set_gate(&self, db: Option<f32>) {
+        let db = db.map_or(f32::NAN, |db| db.clamp(gate::MIN_DB, gate::MAX_DB));
+        self.gate.store(db.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Whether the noise gate silenced the last frame.
+    pub fn gated(&self) -> bool {
+        self.gated.load(Ordering::Relaxed)
     }
 
     fn set_level(&self, level: f32) {
@@ -422,6 +444,7 @@ fn start_session(
                     shared.fail(e);
                 }
                 shared.set_level(0.0);
+                shared.gated.store(false, Ordering::Relaxed);
                 shared.update(|s| {
                     s.state = State::Listening;
                     s.peer = None;
@@ -610,6 +633,7 @@ fn stream(
     let mut source = *shared.source.lock().unwrap();
     let mut capture = Some(Capture::open(source)?);
     let mut pcm = [0i16; FRAME];
+    let mut gate: Option<Gate> = None;
     let mut packet = Vec::with_capacity(1500);
     let (mut seq, mut timestamp) = (0u16, 0u32);
 
@@ -638,7 +662,21 @@ fn stream(
             peak = peak.max((v as i32).abs());
             *s = v;
         }
-        shared.set_level(peak as f32 / 32768.0);
+        let peak = peak as f32 / 32768.0;
+        shared.set_level(peak);
+        gate = match (shared.gate(), gate) {
+            (Some(db), Some(mut g)) => {
+                g.set_threshold(db);
+                Some(g)
+            }
+            (Some(db), None) => Some(Gate::new(db)),
+            (None, _) => None,
+        };
+        if let Some(g) = gate.as_mut() {
+            g.process(&mut pcm, peak);
+        }
+        let gated = gate.as_ref().is_some_and(|g| !g.is_open());
+        shared.gated.store(gated, Ordering::Relaxed);
 
         let opus = enc.encode(&pcm)?;
         packet.clear();

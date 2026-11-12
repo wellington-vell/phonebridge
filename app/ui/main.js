@@ -9,6 +9,11 @@ const els = {
   muteLabel: $("mute-label"),
   gain: $("gain"),
   gainValue: $("gain-value"),
+  gate: $("gate"),
+  gateRow: $("gate-row"),
+  gateValue: $("gate-value"),
+  gateLevel: $("gate-level"),
+  gateThreshold: $("gate-threshold"),
   toggle: $("toggle"),
   toggleLabel: $("toggle-label"),
   error: $("error"),
@@ -58,6 +63,9 @@ const DEFAULTS = {
   keepScreenOn: true,
   gain: 100,
   muted: false,
+  // Noise gate: silence below gateDb (dBFS peak), keeping quieter voices out.
+  gate: false,
+  gateDb: -35,
   // Plaintext clients without the pairing code (official WO Mic client).
   allowUnauthenticated: false,
   camera: false,
@@ -126,6 +134,31 @@ function renderGain() {
   els.gain.value = settings.gain;
   els.gainValue.textContent = `${settings.gain}%`;
   els.gain.style.setProperty("--fill", `${(settings.gain / 400) * 100}%`);
+}
+
+// The threshold slider's range, dBFS; the level meter uses the same scale.
+const GATE_MIN = -70;
+const GATE_MAX = -5;
+const gatePos = (db) => Math.min(1, Math.max(0, (db - GATE_MIN) / (GATE_MAX - GATE_MIN)));
+
+function renderGate() {
+  els.gate.checked = settings.gate;
+  els.gateRow.hidden = !settings.gate;
+  els.gateThreshold.value = settings.gateDb;
+  els.gateValue.textContent = `${String(settings.gateDb).replace("-", "−")} dB`;
+  // The blocked range, left of the thumb, is drawn as the track's empty part.
+  els.gateThreshold.style.setProperty("--fill", `${gatePos(settings.gateDb) * 100}%`);
+}
+
+const gateConfig = () => (settings.gate ? settings.gateDb : null);
+
+// Level meter: jumps up, falls back slowly, so short peaks stay readable.
+let meter = 0;
+function renderMeter(level, gated) {
+  const db = level > 0 ? 20 * Math.log10(level) : -Infinity;
+  meter = Math.max(gatePos(db), meter - 0.06);
+  els.gateLevel.style.width = `${(meter * 100).toFixed(1)}%`;
+  els.gateLevel.classList.toggle("open", !gated && meter > 0);
 }
 
 // Video is too slow over Bluetooth.
@@ -362,8 +395,11 @@ async function poll() {
     els.status.textContent = label;
     els.status.dataset.state = state;
     els.app.dataset.state = state;
-    const level = settings.muted ? 0 : Math.min(1, Math.sqrt(s.level || 0));
+    // The orb shows what reaches the PC; the meter what the gate hears.
+    const heard = settings.muted ? 0 : s.level || 0;
+    const level = s.gated ? 0 : Math.min(1, Math.sqrt(heard));
     els.app.style.setProperty("--level", level.toFixed(3));
+    if (settings.gate) renderMeter(heard, s.gated);
     showError(s.error);
     const ips = JSON.stringify(s.addresses);
     if (ips !== JSON.stringify(addresses)) {
@@ -432,6 +468,7 @@ els.toggle.addEventListener("click", async () => {
           keepScreenOn: settings.keepScreenOn,
           gain: settings.gain / 100,
           muted: settings.muted,
+          gate: gateConfig(),
           allowUnauthenticated: settings.allowUnauthenticated,
           camera: cameraConfig(),
         },
@@ -456,6 +493,20 @@ els.gain.addEventListener("input", () => {
   save();
   renderGain();
   invoke("set_gain", { gain: settings.gain / 100 });
+});
+
+els.gate.addEventListener("change", () => {
+  settings.gate = els.gate.checked;
+  save();
+  renderGate();
+  invoke("set_gate", { gate: gateConfig() });
+});
+
+els.gateThreshold.addEventListener("input", () => {
+  settings.gateDb = Number(els.gateThreshold.value);
+  save();
+  renderGate();
+  invoke("set_gate", { gate: gateConfig() });
 });
 
 transportInputs.forEach((input) =>
@@ -664,6 +715,7 @@ els.orientation.value = settings.orientation;
 [els.source, els.resolution, els.orientation].forEach(syncSelect);
 renderMute();
 renderGain();
+renderGate();
 renderInsecure();
 renderToken();
 renderHint();

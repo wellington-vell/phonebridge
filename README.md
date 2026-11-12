@@ -7,8 +7,8 @@ virtual microphone named **"Phonebridge"**. With `--camera` it also streams the
 phone's camera (H.264, USB or Wi-Fi) into a v4l2loopback **webcam**.
 
 On the phone, use the [Phonebridge Android app](#android-app) in `app/` (Tauri),
-which adds camera sharing, a volume slider, a mute button, audio source
-selection and keep-screen-on. The official WO Mic app works for audio only.
+which adds camera sharing, a volume slider, a mute button, a noise gate, audio
+source selection and keep-screen-on. The official WO Mic app works for audio only.
 
 The protocol was reverse engineered from the official Windows client
 (`WOMicClient.exe` 6.3). No Windows code is included or needed.
@@ -327,6 +327,11 @@ speaks it).
   voice call (echo / noise cancelling), unprocessed, voice performance
 - **Volume** slider (0–400 %) with a level meter, and a big **mute** button;
   both apply live, muting sends silence so the PC input stays up
+- **Noise gate**: sends silence while the sound stays under a threshold you
+  set against a live level meter, so quieter voices across the room don't
+  trip voice activity on the PC; a short hold keeps word endings and pauses
+  (noise cancelling, like the voice call source, keeps other people's voices:
+  they're speech too)
 - **Camera**: live preview pinned at the top of the screen; share the back or
   front camera at 480p, 720p or 1080p (30 fps), landscape or portrait, over USB
   or Wi-Fi. Camera settings apply live without interrupting the microphone; if

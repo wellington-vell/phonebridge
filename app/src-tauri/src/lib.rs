@@ -5,6 +5,7 @@
 
 mod capture;
 mod encoder;
+mod gate;
 mod net;
 mod platform;
 mod secure;
@@ -57,6 +58,9 @@ struct StartConfig {
     keep_screen_on: bool,
     gain: f32,
     muted: bool,
+    /// Noise gate threshold, dBFS, or None when off.
+    #[serde(default)]
+    gate: Option<f32>,
     /// Also accept clients without the pairing code (plaintext, e.g. the
     /// official WO Mic client).
     #[serde(default)]
@@ -109,6 +113,8 @@ struct StatusReply {
     level: f32,
     muted: bool,
     gain: f32,
+    /// The noise gate is silencing the microphone.
+    gated: bool,
     transport: Option<Transport>,
     addresses: Vec<Address>,
     /// From CameraStreamer.kt: {state, peer?, error?, width?, height?,
@@ -209,6 +215,7 @@ async fn start(app: AppHandle, state: State<'_, App>, config: StartConfig) -> Re
     let shared = &state.shared;
     shared.stop.store(false, Ordering::Relaxed);
     shared.set_gain(config.gain);
+    shared.set_gate(config.gate);
     shared.muted.store(config.muted, Ordering::Relaxed);
     *shared.source.lock().unwrap() = config.source;
     state
@@ -362,6 +369,11 @@ fn set_gain(state: State<'_, App>, gain: f32) {
 }
 
 #[tauri::command]
+fn set_gate(state: State<'_, App>, gate: Option<f32>) {
+    state.shared.set_gate(gate);
+}
+
+#[tauri::command]
 fn set_muted(state: State<'_, App>, muted: bool) {
     state.shared.muted.store(muted, Ordering::Relaxed);
 }
@@ -390,6 +402,7 @@ async fn status(app: AppHandle, state: State<'_, App>) -> Result<StatusReply, St
         level: shared.level(),
         muted: shared.muted.load(Ordering::Relaxed),
         gain: shared.gain(),
+        gated: shared.gated(),
         transport: state.worker.lock().unwrap().as_ref().map(|w| w.transport),
         addresses: net::addresses()
             .into_iter()
@@ -452,6 +465,7 @@ pub fn run() {
             start,
             stop,
             set_gain,
+            set_gate,
             set_muted,
             set_source,
             set_keep_screen_on,
